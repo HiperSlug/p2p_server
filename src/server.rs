@@ -3,21 +3,17 @@ use axum::{extract::{ConnectInfo, Path, State}, http::StatusCode, routing::{get,
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+use crate::client::CreateGamePayload;
 
 pub type SharedData = Arc<Mutex<HashMap<Uuid, Game>>>;
-
-#[derive(Deserialize)]
-struct CreateGamePayload {
-    name: String,
-}
 
 pub struct Game {
     external: ExternalGame,
     internal: InternalGame,
 }
 
-#[derive(Serialize, Clone)]
-struct ExternalGame {
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ExternalGame {
     uuid: Uuid,
     name: String,
 }
