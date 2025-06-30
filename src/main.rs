@@ -1,22 +1,38 @@
-use std::{error::Error, net::{IpAddr, Ipv4Addr, SocketAddr}, sync::{Arc, Mutex}};
-use axum::{body::to_bytes, extract::{ConnectInfo, State}, http::StatusCode, routing::post, Json, Router};
+use std::{collections::HashMap, error::Error, net::SocketAddr, sync::{Arc, Mutex}};
+use axum::{extract::{ConnectInfo, State}, http::StatusCode, routing::post, Json, Router};
 use serde_json::Value;
-use serde::Serialize;
-use tokio::{io::AsyncWriteExt, net::{TcpListener, TcpSocket, TcpStream}};
+use serde::{Deserialize, Serialize};
+use tokio::{io::AsyncWriteExt, net::{TcpListener, TcpStream}};
+use uuid::Uuid;
 
-type SharedData = Arc<Mutex<Vec<Game>>>;
 
-#[derive(Serialize)]
+type SharedData = Arc<Mutex<HashMap<Uuid, InternalGame>>>;
+
+
+#[derive(Deserialize)]
+struct CreateGamePayload {
+    name: String,
+}
+
+#[derive(Serialize, Clone)]
 struct Game {
-    host_addr: SocketAddr,
+    name: String,
+    uuid: Uuid,
+}
+
+struct InternalGame {
+    host: SocketAddr,
+    clients: Vec<SocketAddr>,
 }
 
 #[tokio::main]
 async fn main() {
-    let shared_data: SharedData = Arc::new(Mutex::new(Vec::new()));
+    let shared_data: SharedData = Arc::new(Mutex::new(HashMap::new()));
 
     let app = Router::new()
         .route("/matches", post(create_match).get(get_matches))
+        .route("/matches/clients", get(get_clients))
+        .route("/matches/join", post(join_match))
         .with_state(shared_data.clone())
         .into_make_service_with_connect_info::<SocketAddr>();
     
@@ -26,25 +42,37 @@ async fn main() {
 }
 
 async fn create_match(
-    ConnectInfo(host_addr): ConnectInfo<SocketAddr>,
+    ConnectInfo(host): ConnectInfo<SocketAddr>,
     State(shared): State<SharedData>, 
-) -> Result<StatusCode, StatusCode> {
-    
+    Json(payload): Json<CreateGamePayload>,
+) -> Result<Game, StatusCode> {
+
+    // Create game object
     let game = Game {
-        host_addr,
+        name: payload.name,
+        uuid: Uuid::new_v4(),
+        host,
+        clients: Vec::new(),
     };
 
-    let mut games = shared.lock().unwrap();
-    games.push(game);
+    // Add to list
+    let mut games = shared.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    games.insert(game.uuid, game.clone());
 
-    Ok(StatusCode::CREATED)
+    Ok(game)
 }
 
 async fn get_matches(
     State(shared): State<SharedData>,
+) -> Result<Json<HashMap<Uuid, Game>>, StatusCode> {
+    let games = shared.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(games.clone()))
+}
+
+async fn get_clients(
+    Json(uuid): Json<Uuid>,
 ) -> Json<Value> {
-    let games = shared.lock().unwrap();
-    Json(serde_json::to_value(&*games).unwrap())
+
 }
 
 async fn join_match(
@@ -76,7 +104,6 @@ async fn join_match(
         return Err(StatusCode::INTERNAL_SERVER_ERROR)
     }
     
-
     Ok(StatusCode::ACCEPTED)
 }
 
