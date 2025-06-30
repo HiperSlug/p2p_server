@@ -1,12 +1,11 @@
-use std::{collections::HashMap, net::SocketAddr, sync::{Arc, Mutex}};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use axum::{extract::{ConnectInfo, Path, State}, http::StatusCode, routing::{get, post}, Json, Router};
 use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Mutex};
 use uuid::Uuid;
 
 
 type SharedData = Arc<Mutex<HashMap<Uuid, Game>>>;
-
 
 #[derive(Deserialize)]
 struct CreateGamePayload {
@@ -40,9 +39,17 @@ async fn main() {
         .with_state(shared_data.clone())
         .into_make_service_with_connect_info::<SocketAddr>();
     
-    let listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
+    let listener = match TcpListener::bind("127.0.0.1:8080").await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Failed to bind TCP listener: {e}");
+            return
+        }  
+    };
     
-    axum::serve(listener, app).await.unwrap();
+    if let Err(e) = axum::serve(listener, app).await {
+        eprintln!("Server error: {e}")
+    };
 }
 
 async fn create_match(
@@ -66,10 +73,9 @@ async fn create_match(
     };
 
     // Add to list
-    let mut games = shared.lock().map_err(|e| {
-        eprintln!("Lock error: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let mut games = shared.lock().await;
+
+    println!("{host} created game: {uuid}");
 
     games.insert(game.external.uuid, game);
 
@@ -79,10 +85,7 @@ async fn create_match(
 async fn get_matches(
     State(shared): State<SharedData>,
 ) -> Result<Json<HashMap<Uuid, ExternalGame>>, StatusCode> {
-    let games = shared.lock().map_err(|e| {
-        eprintln!("Lock error: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let games = shared.lock().await;
     
     let externals  = games
         .iter()
@@ -97,10 +100,7 @@ async fn get_clients(
     State(shared): State<SharedData>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<Vec<SocketAddr>>, StatusCode> {
-    let games = shared.lock().map_err(|e| {
-        eprintln!("Lock error: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let games = shared.lock().await;
     let game = games.get(&uuid).ok_or_else(|| StatusCode::BAD_REQUEST)?;
     
     Ok(Json(game.internal.clients.clone()))
@@ -111,13 +111,12 @@ async fn join_match(
     State(shared): State<SharedData>,
     Path(uuid): Path<Uuid>,
 ) -> Result<Json<SocketAddr>, StatusCode> {
-    let mut games = shared.lock().map_err(|e| {
-        eprintln!("Lock error: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let mut games = shared.lock().await;
 
     let game = games.get_mut(&uuid).ok_or_else(|| StatusCode::BAD_REQUEST)?;
     
+    println!("{client} joined game {uuid}");
+
     game.internal.clients.push(client);
 
     Ok(Json(game.internal.host))
