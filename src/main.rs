@@ -1,18 +1,14 @@
-use std::net::SocketAddr;
-use p2p_server::server::{self, SharedData};
+use std::net::{Ipv4Addr, SocketAddr};
+use p2p_server::server;
 use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() {
-    let shared_data: SharedData = server::create_shared_data();
+    let app = server::app();
+    let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8080);
 
-    let app = server::server_app(shared_data.clone())
-        .into_make_service_with_connect_info::<SocketAddr>();
-
-    let listener = TcpListener::bind("127.0.0.1:8080").await
-        .expect("TcpListener bind failed.");
-    
+    let listener = TcpListener::bind(addr).await.expect("TcpListener failed binding.");
     if let Err(e) = axum::serve(listener, app).await {
-        eprintln!("Server error: {e}")
-    };
+        println!("Server error: {e}")
+    }
 }
