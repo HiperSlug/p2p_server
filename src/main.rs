@@ -5,7 +5,7 @@ use tokio::net::TcpListener;
 #[tokio::main]
 async fn main() {
     let app = server::app();
-    let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 8080);
+    let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 3000);
 
     let listener = TcpListener::bind(addr).await.expect("TcpListener failed binding.");
     if let Err(e) = axum::serve(listener, app).await {

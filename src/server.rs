@@ -5,16 +5,21 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 use futures::{stream::SplitStream, SinkExt, StreamExt};
 use futures::stream::SplitSink;
-use crate::{client::Message as ClientMessage, Listing};
+use crate::client::{Message as ClientMessage, Listing as ClientListing};
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Listing {
+	id: Uuid,
+	listing: ClientListing,
+}
 
 #[derive(Serialize, Deserialize)]
 pub enum Message{
-	AddListing(Listing),
+	AddListing(ClientListing),
 	RemoveListing,
 	GetListings,
 	Forward(Uuid, ClientMessage),
 }
-
 
 struct Server {
 	sockets: Mutex<HashMap<Uuid, Arc<Mutex<SplitSink<WebSocket, WsMessage>>>>>,
@@ -59,6 +64,11 @@ impl Server {
 		Ok(())
 	}
 
+	pub async fn listing_to_session(&self, listing_id: &Uuid) -> Option<Uuid> {
+		let id_map = self.id_map.lock().await;
+		id_map.get(listing_id).cloned()
+	}
+
 	pub async fn listings(&self) -> Vec<Listing> {
 		let listings = self.listings.lock().await;
 		listings
@@ -67,7 +77,16 @@ impl Server {
 			.collect()
 	}
 
-	pub async fn add_listing(&self, session_id: Uuid, listing: Listing) {
+	pub async fn add_listing(&self, session_id: Uuid, listing: ClientListing) {
+		self.remove_listing(&session_id).await;
+
+		println!("New listing: {listing:?}");
+
+		let listing = Listing {
+			id: Uuid::new_v4(), 
+			listing
+		};
+
 		let mut id_map = self.id_map.lock().await;
 		id_map.insert(listing.id, session_id);
 		
@@ -101,6 +120,8 @@ async fn handle_socket(
 	server: Arc<Server>,
 ) {
 	let session_id = Uuid::new_v4();
+
+	println!("New connection: {session_id}");
 	
 	let (ws_write, ws_read) = socket.split();
 	server.add_ws_write(session_id, ws_write).await;
@@ -108,6 +129,8 @@ async fn handle_socket(
 	handle_ws_read(ws_read, &session_id, server.clone()).await;	
 
 	server.remove_ws_write(&session_id).await;
+
+	println!("Disconnect: {session_id}");
 }
 
 async fn handle_ws_read(
@@ -132,7 +155,8 @@ async fn handle_ws_read(
 						eprintln!("Unable to send listings: {e}")
 					}
 				}
-				Message::Forward(to, msg) => {
+				Message::Forward(listing_id, msg) => {
+					let to = server.listing_to_session(&listing_id).await.unwrap_or(listing_id);
 					if let Err(e) = server.send_msg(&to, &msg).await {
 						eprintln!("Failed to forward message: {e}")
 					}
