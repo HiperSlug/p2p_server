@@ -6,19 +6,11 @@ service PuncherService {
 	rpc AddListing (AddListingRequest) returns (AddListingResult);
 	rpc RemoveListing (RemoveListingRequest) returns (RemoveListingResult);
 	rpc GetListings (Empty) returns (GetListingsResult);
+	rpc Ping(PingRequest) return PingResponse;
 }
-
-// ---- TYPES ---- //
 
 // -- EMPTY --
 message Empty {}
-
-
-// -- RESULT --
-message GenericSuccess {}
-
-message GenericError {}
-
 
 // -- LISTINGS --
 message ListingNoID {
@@ -38,41 +30,29 @@ message AddListingRequest {
 	ListingNoID listing = 1;
 }
 
-message AddListingResult {
-	oneof result {
-		AddListingSuccess ok = 1;
-		GenericError err = 2;
-	}
-}
-
-message AddListingSuccess {
-	string id = 1;
+message AddListingResponse {
+	string listing_id = 1;
 }
 
 
 // -- RemoveListing --
 message RemoveListingRequest {
-	string id = 1;
+	string session_id = 1;
+	string listing_id = 2;
 }
 
-message RemoveListingResult {
-	oneof result {
-		GenericSuccess ok = 1;
-		GenericError err = 2;
-	}
-}
+message RemoveListingResponse {}
 
 
 // -- GetListing --
-message GetListingsResult {
-	oneof result {
-		GetListingsSuccess ok = 1;
-		GenericError err = 2;
-	}
-}
-
-message GetListingsSuccess {
-	repeated Listing listings = 1;
+message GetListingsResponse {
+	repeated Listing listings = 2;
 }
 
 
+// -- Ping --
+message PingRequest {
+	string session_id = 1;
+}
+
+message PingResponse {}

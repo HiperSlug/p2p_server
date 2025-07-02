@@ -4,7 +4,7 @@ use tokio::time::sleep;
 use tonic::{transport::Server, Request, Response, Status};
 
 #[derive(Default)]
-pub struct PuncherServer;
+pub struct PuncherServer {}
 
 #[tonic::async_trait]
 impl PuncherService for PuncherServer {
