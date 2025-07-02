@@ -5,7 +5,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 use futures::{stream::SplitStream, SinkExt, StreamExt};
 use futures::stream::SplitSink;
-use crate::client::{Message as ClientMessage, Listing as ClientListing};
+use crate::{client::{Listing as ClientListing, Message as ClientMessage}, ToWs};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Listing {
@@ -14,12 +14,22 @@ pub struct Listing {
 }
 
 #[derive(Serialize, Deserialize)]
-pub enum Message{
+pub enum Message {
 	AddListing(ClientListing),
 	RemoveListing,
 	GetListings,
 	Forward(Uuid, ClientMessage),
 }
+
+impl ToWs for Message {}
+
+#[derive(Serialize, Deserialize)]
+pub enum Response {
+	Listings(Vec<Listing>),
+}
+
+impl ToWs for Response {}
+
 
 struct Server {
 	sockets: Mutex<HashMap<Uuid, Arc<Mutex<SplitSink<WebSocket, WsMessage>>>>>,
@@ -47,18 +57,21 @@ impl Server {
 		sockets.remove(session_id);
 	}
 
-	pub async fn send_msg(
+	pub async fn send<T>(
 		&self, 
 		to: &Uuid, 
-		msg: &ClientMessage,
-	) -> Result<(), Box<dyn Error>> {
+		msg: &T,
+	) -> Result<(), Box<dyn Error>> 
+	where T: ToWs
+	{
 		let mut sockets = self.sockets.lock().await;
-		let ws_write = sockets.get_mut(to).ok_or("ID doesn't point to a socket.")?.clone();
+		let ws_write = sockets
+			.get_mut(to)
+			.ok_or("ID doesn't point to a socket.")?
+			.clone();
 
 		let mut ws_write = ws_write.lock().await;
-
-		let json = serde_json::to_string(msg)?;
-		let msg = WsMessage::text(json);
+		let msg = msg.to_ws()?;
 
 		ws_write.send(msg).await?;
 		Ok(())
@@ -151,13 +164,13 @@ async fn handle_ws_read(
 				Message::AddListing(l) => server.add_listing(*session_id, l).await,
 				Message::RemoveListing => server.remove_listing(session_id).await,
 				Message::GetListings => {
-					if let Err(e) = server.send_msg(session_id, &ClientMessage::Listings(server.listings().await)).await {
+					if let Err(e) = server.send(session_id, &Response::Listings(server.listings().await)).await {
 						eprintln!("Unable to send listings: {e}")
 					}
 				}
 				Message::Forward(listing_id, msg) => {
 					let to = server.listing_to_session(&listing_id).await.unwrap_or(listing_id);
-					if let Err(e) = server.send_msg(&to, &msg).await {
+					if let Err(e) = server.send(&to, &msg).await {
 						eprintln!("Failed to forward message: {e}")
 					}
 				}

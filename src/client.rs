@@ -19,8 +19,10 @@ impl ISprite2D for Puncher {
 
 #[derive(Serialize, Deserialize)]
 pub enum Message {
-	Listings(Vec<ServerListing>),
+	Listings(),
 }
+
+
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Listing {
