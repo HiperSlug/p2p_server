@@ -1,15 +1,15 @@
-use futures::prelude::*;
-use tarpc::{client, context, server::{self, Channel}};
+use futures::{prelude::*};
+use tarpc::{client, context, server::{self, incoming::Incoming, Channel}};
 
 #[tarpc::service]
-pub trait Puncher {
+trait Puncher {
     async fn hello(name: String) -> String;
 }
 
 #[derive(Clone)]
-pub struct Server {}
+struct PuncherServer;
 
-impl Puncher for Server {
+impl Puncher for PuncherServer {
     async fn hello(self, _: context::Context, name: String) -> String {
         format!("Hello, {name}!")
     }
@@ -21,16 +21,16 @@ async fn main() -> anyhow::Result<()> {
 
     let server = server::BaseChannel::with_defaults(server_transport);
     tokio::spawn(
-        server.execute(Server.serve())
+        server.execute(PuncherServer.serve())
             .for_each(|response| async move {
                 tokio::spawn(response);
             }));
-    
-    let client = PuncherClient::new(client::Config::default(), client_transport).spawn();
-    
-    let response = client.hello(context::current(), "NAME".to_string()).await?;
 
-    println!("{response}");
+    let client = PuncherClient::new(client::Config::default(), client_transport).spawn();
+
+    let hello = client.hello(context::current(), "Stim".to_string()).await?;
+
+    println!("{hello}");
 
     Ok(())
 }
