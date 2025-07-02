@@ -1,24 +1,33 @@
-use futures::{prelude::*};
-use tarpc::{client, context, server::{self, Channel}};
-use nat_puncher::rpc::{Puncher, PuncherClient, PuncherServer};
+use tonic::{transport::Server, Request, Response, Status};
+use puncher::hello_service_server::{HelloService, HelloServiceServer};
+use puncher::{HelloRequest, HelloResponse};
 
+pub mod puncher {
+	tonic::include_proto!("puncher");
+}
+
+#[derive(Default)]
+pub struct MyHelloService;
+
+#[tonic::async_trait]
+impl HelloService for MyHelloService {
+	async fn say_hello(&self, request: Request<HelloRequest>) -> Result<Response<HelloResponse>, Status> {
+		let reply = HelloResponse {
+			message: format!("Hello {}!", request.into_inner().name),
+		};
+		Ok(Response::new(reply))
+	}
+}
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let (client_transport, server_transport) = tarpc::transport::channel::unbounded();
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+	let addr = "[::1]:50051".parse()?;
+	let hello_service = MyHelloService::default();
 
-    let server = server::BaseChannel::with_defaults(server_transport);
-    tokio::spawn(
-        server.execute(PuncherServer.serve())
-            .for_each(|response| async move {
-                tokio::spawn(response);
-            }));
+	Server::builder()
+		.add_service(HelloServiceServer::new(hello_service))
+		.serve(addr)
+		.await?;
 
-    let client = PuncherClient::new(client::Config::default(), client_transport).spawn();
-
-    let hello = client.hello(context::current(), "Stim".to_string()).await?;
-
-    println!("{hello}");
-
-    Ok(())
+	Ok(())
 }
