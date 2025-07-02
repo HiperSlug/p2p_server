@@ -1,21 +1,19 @@
 use futures::prelude::*;
 use tarpc::{client, context, server::{self, Channel}};
 
-
 #[tarpc::service]
-trait Puncher {
+pub trait Puncher {
     async fn hello(name: String) -> String;
 }
 
 #[derive(Clone)]
-struct Server;
+pub struct Server {}
 
 impl Puncher for Server {
     async fn hello(self, _: context::Context, name: String) -> String {
         format!("Hello, {name}!")
     }
 }
-
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
