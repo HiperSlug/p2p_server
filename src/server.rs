@@ -1,62 +1,211 @@
-use std::{net::SocketAddr, time::Duration};
-use crate::puncher::{self, puncher_service_client::PuncherServiceClient, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResult, GetListingsResult, ListingNoId, RemoveListingRequest, RemoveListingResult};
-use tokio::time::sleep;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::{Duration, Instant}};
+use crate::puncher::{puncher_service_client::PuncherServiceClient, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, GetListingsRequest, GetListingsResponse, PingRequest, PingResponse, RemoveListingRequest, RemoveListingResponse};
+use crate::puncher::Listing as ListingPacket;
+use crate::puncher::ListingNoId as ListingNoIdPacket;
+use anyhow::{anyhow, bail, Result};
+use tokio::{sync::RwLock, time::sleep};
 use tonic::{transport::Server, Request, Response, Status};
+use uuid::Uuid;
 
+// -- Session -- //
+struct Session {
+	id: Uuid,
+	last_seen: Instant,
+	listing: Option<Listing>,
+}
+
+impl Session {
+	const TIMEOUT: Duration = Duration::from_secs(30);
+
+	pub fn new() -> Self {
+		Self {
+			id: Uuid::new_v4(),
+			last_seen: Instant::now(),
+			listing: None,
+		}
+	}
+
+	pub fn see(&mut self) {
+		self.last_seen = Instant::now();
+	}
+
+	pub fn is_valid(&self) -> bool {
+		self.last_seen.elapsed() < Self::TIMEOUT
+	}
+}
+
+// -- Listing -- //
+struct Listing {
+	listing_no_id: ListingNoId,
+	id: Uuid,
+}
+
+impl Listing {
+	fn new(listing_no_id: ListingNoId) -> Listing {
+		Listing {
+			listing_no_id,
+			id: Uuid::new_v4(),
+		}
+	}
+
+	fn to_packet(&self) -> ListingPacket {
+		ListingPacket {
+			listing_no_id: Some(self.listing_no_id.to_packet()),
+			id: self.id.to_string(),
+		}
+	}
+}
+
+struct ListingNoId {
+	name: String, 
+}
+
+impl ListingNoId {
+	fn to_packet(&self) -> ListingNoIdPacket {
+		ListingNoIdPacket {
+			name: self.name.clone(),
+		}
+	}
+
+	fn from_packet(listing_no_id_packet: ListingNoIdPacket) -> ListingNoId {
+		ListingNoId {
+			name: listing_no_id_packet.name,
+		}
+	}
+}
+
+// -- Server -- //
 #[derive(Default)]
-pub struct PuncherServer {}
+pub struct PuncherServer {
+	sessions: Arc<RwLock<HashMap<Uuid, Session>>>,
+}
+
+impl PuncherServer {
+	async fn check(&self, session_id: &Uuid) -> Result<()> {
+		let sessions = self.sessions.read().await;
+		let session = sessions.get(session_id).ok_or(anyhow!("Not found."))?;
+		
+		if !session.is_valid() {
+			let mut sessions = self.sessions.write().await;
+			sessions.remove(session_id);
+			bail!("Expired.")
+		} else {
+			Ok(())
+		}
+	}
+}
 
 #[tonic::async_trait]
 impl PuncherService for PuncherServer {
-    async fn add_listing(
+    
+	// -- listings -- //
+	async fn add_listing(
         &self,
         request: Request<AddListingRequest>,
-    ) -> Result<Response<AddListingResult>, Status> {
-        Err(Status::aborted(""))
+    ) -> Result<Response<AddListingResponse>, Status> {
+		let request = request.into_inner();
+
+		// validate session //
+		let session_id = request.session_id.parse::<Uuid>()
+			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
+
+		self.check(&session_id).await.map_err(|e| Status::invalid_argument(format!("Invalid session_id: {e}")))?;
+
+		let mut sessions = self.sessions.write().await;
+		let session = sessions.get_mut(&session_id)
+			.ok_or(Status::internal("Session ID expired or non-existent (after session validation)"))?;
+
+		// validate assignment //
+		if session.listing.is_some() {
+			return Err(Status::already_exists("This session already has an associated listing."))
+		}
+
+		// assignment //
+		let listing_no_id_packet = request
+			.listing
+			.ok_or(Status::invalid_argument("No supplied listing."))?;
+		let listing = Listing::new(ListingNoId::from_packet(listing_no_id_packet));
+		
+		let listing_id = listing.id.to_string();
+
+		session.listing = Some(listing);
+
+		Ok(Response::new(AddListingResponse { listing_id }))
     }
 
     async fn remove_listing(
         &self,
         request: Request<RemoveListingRequest>,
-    ) -> Result<Response<RemoveListingResult>, Status> {
-        Err(Status::aborted(""))
+    ) -> Result<Response<RemoveListingResponse>, Status> {
+        let request = request.into_inner();
+
+		// validate session //
+		let session_id = request.session_id.parse::<Uuid>()
+			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
+
+		self.check(&session_id).await.map_err(|e| Status::invalid_argument(format!("Invalid session_id: {e}")))?;
+
+		let mut sessions = self.sessions.write().await;
+		let session = sessions.get_mut(&session_id)
+			.ok_or(Status::internal("Session ID expired or non-existent (after session validation)"))?;
+
+		// assignment //
+		session.listing = None;
+
+		Ok(Response::new(RemoveListingResponse {}))
     }
 
     async fn get_listings(
         &self,
-        request: Request<puncher::Empty>,
-    ) -> Result<Response<GetListingsResult>, Status> {
-        Err(Status::aborted(""))
+        _: Request<GetListingsRequest>,
+    ) -> Result<Response<GetListingsResponse>, Status> {
+        let sessions = self.sessions.read().await;
+		let listings = sessions
+			.iter()
+			.filter_map(|(_, s)| s.listing.as_ref().map(|l| l.to_packet()))
+			.collect::<Vec<ListingPacket>>();
+		Ok(Response::new(GetListingsResponse { listings }))
     }
+
+	// -- connection -- //
+	async fn create_session(
+		&self,
+		_: Request<CreateSessionRequest>,
+	) -> Result<Response<CreateSessionResponse>, Status> {
+		let session = Session::new();
+		
+		let session_id = session.id.to_string();
+
+		let mut sessions = self.sessions.write().await;
+		sessions.insert(session.id, session);
+		
+		Ok(Response::new(CreateSessionResponse {session_id}))
+	}
+	
+	async fn ping(
+		&self,
+		request: Request<PingRequest>,
+	) -> Result<Response<PingResponse>, Status> {
+		let session_id = request
+			.into_inner()
+			.session_id
+			.parse::<Uuid>()
+			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
+
+		let mut sessions = self.sessions.write().await;
+		let session = sessions.get_mut(&session_id).ok_or(Status::invalid_argument("Session ID expired or non-existent."))?;
+
+		session.see();
+
+		Ok(Response::new(PingResponse {}))
+	}
 }
 
 pub async fn run() -> anyhow::Result<()> {
+    dummy_client();
+
 	let addr: SocketAddr = "127.0.0.1:3000".parse().unwrap();
 	let server = PuncherServer::default();
-
-    tokio::spawn(async move {
-        let mut client = PuncherServiceClient::connect("https://localhost:3000").await.unwrap();
-        
-        
-        loop {
-            sleep(Duration::from_secs(1)).await;
-            let request = tonic::Request::new(AddListingRequest {
-                listing: Some(ListingNoId {
-					name: "Raphael".to_string(),
-				}),
-            });
-
-            let response = match client.add_listing(request).await {
-				Ok(resp) => resp,
-				Err(e) => {
-					eprintln!("Err: {e}");
-					continue;
-				}
-			};
-
-            println!("Response = {response:?}");
-        }
-    });
 
 	Server::builder()
 		.add_service(PuncherServiceServer::new(server))
@@ -65,3 +214,31 @@ pub async fn run() -> anyhow::Result<()> {
 	
 	Ok(())
 }
+
+fn dummy_client() {
+	tokio::spawn(async move {
+        let mut client = PuncherServiceClient::connect("https://localhost:3000").await.unwrap();
+        
+		let session_id =client
+			.create_session(CreateSessionRequest {})
+			.await
+			.unwrap()
+			.into_inner()
+			.session_id;
+        
+        loop {
+            sleep(Duration::from_secs(1)).await;
+            let request: Request<AddListingRequest> = Request::new(AddListingRequest {
+				session_id: session_id.clone(),
+                listing: Some(ListingNoIdPacket {
+					name: "Raphael".to_string(),
+				}),
+            });
+
+            match client.add_listing(request).await {
+				Ok(resp) => println!("Response = {resp:?}"),
+				Err(e) => eprintln!("Err: {e}")
+			};
+        }
+    });
+} 

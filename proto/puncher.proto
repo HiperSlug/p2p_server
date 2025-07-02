@@ -3,22 +3,21 @@ syntax = "proto3";
 package puncher;
 
 service PuncherService {
-	rpc AddListing (AddListingRequest) returns (AddListingResult);
-	rpc RemoveListing (RemoveListingRequest) returns (RemoveListingResult);
-	rpc GetListings (Empty) returns (GetListingsResult);
-	rpc Ping(PingRequest) return PingResponse;
+	rpc AddListing (AddListingRequest) returns (AddListingResponse);
+	rpc RemoveListing (RemoveListingRequest) returns (RemoveListingResponse);
+	rpc GetListings (GetListingsRequest) returns (GetListingsResponse);
+	rpc Ping (PingRequest) returns (PingResponse);
+	rpc CreateSession (CreateSessionRequest) returns (CreateSessionResponse);
 }
 
-// -- EMPTY --
-message Empty {}
+// -- LISTINGS -- //
 
-// -- LISTINGS --
 message ListingNoID {
 	string name = 1;
 }
 
 message Listing {
-	ListingNoID listing = 1;
+	ListingNoID listing_no_id = 1;
 	string id = 2;
 }
 
@@ -28,6 +27,7 @@ message Listing {
 // -- AddListing --
 message AddListingRequest {
 	ListingNoID listing = 1;
+	string session_id = 2;
 }
 
 message AddListingResponse {
@@ -38,15 +38,24 @@ message AddListingResponse {
 // -- RemoveListing --
 message RemoveListingRequest {
 	string session_id = 1;
-	string listing_id = 2;
 }
 
 message RemoveListingResponse {}
 
 
 // -- GetListing --
+message GetListingsRequest {}
+
 message GetListingsResponse {
 	repeated Listing listings = 2;
+}
+
+
+// -- CreateSession --
+message CreateSessionRequest {}
+
+message CreateSessionResponse {
+	string session_id = 1;
 }
 
 
