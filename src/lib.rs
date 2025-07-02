@@ -11,13 +11,12 @@ pub mod rpc {
 		async fn hello(name: String) -> String;
 	}
 
-	pub struct Server {
+	#[derive(Clone)]
+	pub struct PuncherServer;
 
-	}
-
-	impl Puncher for Server {
-		async fn hello(self, _: Context, str: String) -> String {
-			format!("Hello {str}!")
+	impl Puncher for PuncherServer {
+		async fn hello(self, _: Context, name: String) -> String {
+			format!("Hello, {name}!")
 		}
 	}
 }

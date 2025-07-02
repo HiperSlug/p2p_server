@@ -1,19 +1,7 @@
 use futures::{prelude::*};
-use tarpc::{client, context, server::{self, incoming::Incoming, Channel}};
+use tarpc::{client, context, server::{self, Channel}};
+use nat_puncher::rpc::{Puncher, PuncherClient, PuncherServer};
 
-#[tarpc::service]
-trait Puncher {
-    async fn hello(name: String) -> String;
-}
-
-#[derive(Clone)]
-struct PuncherServer;
-
-impl Puncher for PuncherServer {
-    async fn hello(self, _: context::Context, name: String) -> String {
-        format!("Hello, {name}!")
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
