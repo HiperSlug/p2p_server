@@ -78,6 +78,7 @@ impl ListingNoId {
 #[derive(Default)]
 pub struct PuncherServer {
 	sessions: Arc<RwLock<HashMap<Uuid, Session>>>,
+	id_map: Arc<RwLock<HashMap<Uuid, Uuid>>>,
 }
 
 impl PuncherServer {
@@ -126,6 +127,9 @@ impl PuncherService for PuncherServer {
 			.ok_or(Status::invalid_argument("No supplied listing."))?;
 		let listing = Listing::new(ListingNoId::from_packet(listing_no_id_packet));
 		
+		let mut id_map = self.id_map.write().await;
+		id_map.insert(listing.id, session_id);
+
 		let listing_id = listing.id.to_string();
 
 		session.listing = Some(listing);
@@ -150,7 +154,12 @@ impl PuncherService for PuncherServer {
 			.ok_or(Status::internal("Session ID expired or non-existent (after session validation)"))?;
 
 		// assignment //
-		session.listing = None;
+		if let Some(listing) = session.listing.as_ref() {
+			let mut id_map = self.id_map.write().await;
+			id_map.remove(&listing.id);
+			
+			session.listing = None;
+		}
 
 		Ok(Response::new(RemoveListingResponse {}))
     }
