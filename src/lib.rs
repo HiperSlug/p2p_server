@@ -1,9 +1,13 @@
-// use godot::prelude::*;
+use godot::prelude::*;
 
 pub mod server;
 pub mod client;
 
-// struct NATPuncher;
+pub mod puncher {
+	tonic::include_proto!("puncher");
+}
 
-// #[gdextension]
-// unsafe impl ExtensionLibrary for NATPuncher {}
+struct NATPuncher;
+
+#[gdextension]
+unsafe impl ExtensionLibrary for NATPuncher {}
