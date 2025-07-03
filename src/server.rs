@@ -94,16 +94,43 @@ impl PuncherServer {
 			Ok(())
 		}
 	}
+
+	async fn cleanup(&self) {
+		let expired = {
+			let sessions = self.sessions.read().await;
+			sessions
+				.iter()
+				.filter(|(_, s)| !s.is_valid())
+				.map(|(id, _)| *id)
+				.collect::<Vec<Uuid>>()
+		};
+
+		if expired.is_empty() {
+			return;
+		}
+
+		let mut sessions = self.sessions.write().await;
+		for id in expired {
+			sessions.remove(&id);
+		}
+	}
+
+	pub async fn rand_cleanup(&self) { // I couldnt be bothered to spawn and despawn an async task.
+		if rand::random::<f32>() < 0.1 {
+			self.cleanup().await;
+		}
+	}
 }
 
 #[tonic::async_trait]
 impl PuncherService for PuncherServer {
-    
 	// -- listings -- //
 	async fn add_listing(
         &self,
         request: Request<AddListingRequest>,
     ) -> Result<Response<AddListingResponse>, Status> {
+		self.rand_cleanup().await;
+
 		let request = request.into_inner();
 
 		// validate session //
@@ -141,6 +168,8 @@ impl PuncherService for PuncherServer {
         &self,
         request: Request<RemoveListingRequest>,
     ) -> Result<Response<RemoveListingResponse>, Status> {
+		self.rand_cleanup().await;
+
         let request = request.into_inner();
 
 		// validate session //
@@ -168,6 +197,8 @@ impl PuncherService for PuncherServer {
         &self,
         _: Request<GetListingsRequest>,
     ) -> Result<Response<GetListingsResponse>, Status> {
+		self.rand_cleanup().await;
+
         let sessions = self.sessions.read().await;
 		let listings = sessions
 			.iter()
@@ -190,7 +221,7 @@ impl PuncherService for PuncherServer {
 		
 		Ok(Response::new(CreateSessionResponse {session_id}))
 	}
-	
+
 	async fn ping(
 		&self,
 		request: Request<PingRequest>,
