@@ -17,7 +17,7 @@ service PuncherService {
 service PeerService {
 	rpc Join (JoinRequest) returns (JoinResponse);
 
-	rpc Punch (PunchRequest) returns (PunuchResponse);
+	rpc Punch (PunchRequest) returns (PunchResponse);
 
 	rpc Proxy (ProxyRequest) returns (ProxyResponse);
 }
@@ -93,7 +93,7 @@ message PingResponse {}
 message ForwardJoinRequest {
 	bytes session_id = 1;
 	bytes target_listing_id = 2;
-	TunnelRequest request = 3;
+	JoinRequest request = 3;
 }
 
 message ForwardJoinResponse {}
