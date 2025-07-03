@@ -48,29 +48,48 @@ impl Listing {
 			id: Uuid::new_v4(),
 		}
 	}
+}
 
-	fn to_packet(&self) -> ListingPacket {
-		ListingPacket {
-			listing_no_id: Some(self.listing_no_id.to_packet()),
-			id: self.id.to_string(),
+impl TryFrom<ListingPacket> for Listing {
+	type Error = anyhow::Error;
+
+	fn try_from(listing_packet: ListingPacket) -> Result<Self> {
+		Ok(Self {
+			listing_no_id: listing_packet
+				.listing_no_id
+				.ok_or(anyhow!("Empty packet."))?
+				.into(),
+			id: listing_packet.id.try_into()?,
+		})
+	}
+}
+
+impl From<&Listing> for ListingPacket {
+	fn from(listing: &Listing) -> Self {
+		Self {
+			listing_no_id: Some(listing.listing_no_id.clone().into()),
+			id: listing.id.into(),
 		}
 	}
 }
 
+#[derive(Clone)]
 struct ListingNoId {
 	name: String, 
 }
 
-impl ListingNoId {
-	fn to_packet(&self) -> ListingNoIdPacket {
-		ListingNoIdPacket {
-			name: self.name.clone(),
+impl From<ListingNoIdPacket> for ListingNoId {
+	fn from(listing_no_id_packet: ListingNoIdPacket) -> Self {
+		Self {
+			name: listing_no_id_packet.name,
 		}
 	}
+}
 
-	fn from_packet(listing_no_id_packet: ListingNoIdPacket) -> ListingNoId {
-		ListingNoId {
-			name: listing_no_id_packet.name,
+impl From<ListingNoId> for ListingNoIdPacket {
+	fn from(listing_no_id: ListingNoId) -> Self {
+		Self {
+			name: listing_no_id.name,
 		}
 	}
 }
@@ -149,7 +168,7 @@ impl PuncherService for PuncherServer {
 		let request = request.into_inner();
 
 		// validate session //
-		let session_id = request.session_id.parse::<Uuid>()
+		let session_id = request.session_id.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
 
 		self.check(&session_id).await.map_err(|e| Status::invalid_argument(format!("Invalid session_id: {e}")))?;
@@ -167,12 +186,12 @@ impl PuncherService for PuncherServer {
 		let listing_no_id_packet = request
 			.listing
 			.ok_or(Status::invalid_argument("No supplied listing."))?;
-		let listing = Listing::new(ListingNoId::from_packet(listing_no_id_packet));
+		let listing = Listing::new(listing_no_id_packet.into());
 		
 		let mut id_map = self.id_map.write().await;
 		id_map.insert(listing.id, session_id);
 
-		let listing_id = listing.id.to_string();
+		let listing_id = listing.id.into();
 
 		session.listing = Some(listing);
 
@@ -188,7 +207,7 @@ impl PuncherService for PuncherServer {
         let request = request.into_inner();
 
 		// validate session //
-		let session_id = request.session_id.parse::<Uuid>()
+		let session_id = request.session_id.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
 
 		self.check(&session_id).await.map_err(|e| Status::invalid_argument(format!("Invalid session_id: {e}")))?;
@@ -217,7 +236,7 @@ impl PuncherService for PuncherServer {
         let sessions = self.sessions.read().await;
 		let listings = sessions
 			.iter()
-			.filter_map(|(_, s)| s.listing.as_ref().map(|l| l.to_packet()))
+			.filter_map(|(_, s)| s.listing.as_ref().map(|l| l.into()))
 			.collect::<Vec<ListingPacket>>();
 		Ok(Response::new(GetListingsResponse { listings }))
     }
@@ -229,7 +248,7 @@ impl PuncherService for PuncherServer {
 	) -> Result<Response<CreateSessionResponse>, Status> {
 		let session = Session::new();
 		
-		let session_id = session.id.to_string();
+		let session_id = session.id.into();
 
 		let mut sessions = self.sessions.write().await;
 		sessions.insert(session.id, session);
@@ -243,7 +262,7 @@ impl PuncherService for PuncherServer {
 	) -> Result<Response<EndSessionResponse>, Status> {
 		let request = request.into_inner();
 
-		let session_id = request.session_id.parse::<Uuid>()
+		let session_id = request.session_id.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
 
 		self.remove_deep(&[session_id]).await;
@@ -258,7 +277,7 @@ impl PuncherService for PuncherServer {
 		let session_id = request
 			.into_inner()
 			.session_id
-			.parse::<Uuid>()
+			.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
 
 		let mut sessions = self.sessions.write().await;

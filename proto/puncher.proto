@@ -19,7 +19,7 @@ message ListingNoID {
 
 message Listing {
 	ListingNoID listing_no_id = 1;
-	string id = 2;
+	bytes id = 2;
 }
 
 
@@ -28,17 +28,17 @@ message Listing {
 // -- AddListing --
 message AddListingRequest {
 	ListingNoID listing = 1;
-	string session_id = 2;
+	bytes session_id = 2;
 }
 
 message AddListingResponse {
-	string listing_id = 1;
+	bytes listing_id = 1;
 }
 
 
 // -- RemoveListing --
 message RemoveListingRequest {
-	string session_id = 1;
+	bytes session_id = 1;
 }
 
 message RemoveListingResponse {}
@@ -56,13 +56,13 @@ message GetListingsResponse {
 message CreateSessionRequest {}
 
 message CreateSessionResponse {
-	string session_id = 1;
+	bytes session_id = 1;
 }
 
 
 // -- EndSession --
 message EndSessionRequest {
-	string session_id = 1;
+	bytes session_id = 1;
 }
 
 message EndSessionResponse {}
@@ -70,7 +70,7 @@ message EndSessionResponse {}
 
 // -- Ping --
 message PingRequest {
-	string session_id = 1;
+	bytes session_id = 1;
 }
 
 message PingResponse {}
