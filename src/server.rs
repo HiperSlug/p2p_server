@@ -3,6 +3,7 @@ use crate::puncher::{puncher_service_client::PuncherServiceClient, puncher_servi
 use crate::puncher::Listing as ListingPacket;
 use crate::puncher::ListingNoId as ListingNoIdPacket;
 use anyhow::{anyhow, bail, Result};
+use rand::random;
 use tokio::{sync::RwLock, time::sleep};
 use tonic::{transport::Server, Request, Response, Status};
 use uuid::Uuid;
@@ -129,8 +130,8 @@ impl PuncherServer {
 		self.remove_deep(&expired).await;
 	}
 
-	pub async fn rand_cleanup(&self) { // I couldnt be bothered to spawn and despawn an async task.
-		if rand::random::<f32>() < 0.1 {
+	pub async fn cleanup_chance(&self) { // I couldnt be bothered to spawn and despawn an async task.
+		if random::<f32>() < 0.1 {
 			self.cleanup().await;
 		}
 	}
@@ -143,7 +144,7 @@ impl PuncherService for PuncherServer {
         &self,
         request: Request<AddListingRequest>,
     ) -> Result<Response<AddListingResponse>, Status> {
-		self.rand_cleanup().await;
+		self.cleanup_chance().await;
 
 		let request = request.into_inner();
 
@@ -182,7 +183,7 @@ impl PuncherService for PuncherServer {
         &self,
         request: Request<RemoveListingRequest>,
     ) -> Result<Response<RemoveListingResponse>, Status> {
-		self.rand_cleanup().await;
+		self.cleanup_chance().await;
 
         let request = request.into_inner();
 
@@ -211,7 +212,7 @@ impl PuncherService for PuncherServer {
         &self,
         _: Request<GetListingsRequest>,
     ) -> Result<Response<GetListingsResponse>, Status> {
-		self.rand_cleanup().await;
+		self.cleanup_chance().await;
 
         let sessions = self.sessions.read().await;
 		let listings = sessions
