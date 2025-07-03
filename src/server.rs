@@ -1,5 +1,5 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::{Duration, Instant}};
-use crate::puncher::{puncher_service_client::PuncherServiceClient, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, GetListingsRequest, GetListingsResponse, PingRequest, PingResponse, RemoveListingRequest, RemoveListingResponse};
+use crate::puncher::{puncher_service_client::PuncherServiceClient, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, GetListingsRequest, GetListingsResponse, PingRequest, PingResponse, RemoveListingRequest, RemoveListingResponse};
 use crate::puncher::Listing as ListingPacket;
 use crate::puncher::ListingNoId as ListingNoIdPacket;
 use anyhow::{anyhow, bail, Result};
@@ -87,12 +87,29 @@ impl PuncherServer {
 		let session = sessions.get(session_id).ok_or(anyhow!("Not found."))?;
 		
 		if !session.is_valid() {
-			let mut sessions = self.sessions.write().await;
-			sessions.remove(session_id);
+			self.remove_deep(&[*session_id]).await;
+			
 			bail!("Expired.")
 		} else {
 			Ok(())
 		}
+	}
+
+	async fn remove_deep(&self, session_ids: &[Uuid]) {
+		let mut sessions = self.sessions.write().await;
+		let removed_sessions = session_ids
+			.iter()
+			.filter_map(|id| sessions.remove(id))
+			.collect::<Vec<Session>>();
+		
+		let mut id_map = self.id_map.write().await;
+		removed_sessions
+			.iter()
+			.for_each(|s| {
+				if let Some(listing) = s.listing.as_ref() {
+					id_map.remove(&listing.id);
+				}
+			});
 	}
 
 	async fn cleanup(&self) {
@@ -109,10 +126,7 @@ impl PuncherServer {
 			return;
 		}
 
-		let mut sessions = self.sessions.write().await;
-		for id in expired {
-			sessions.remove(&id);
-		}
+		self.remove_deep(&expired).await;
 	}
 
 	pub async fn rand_cleanup(&self) { // I couldnt be bothered to spawn and despawn an async task.
@@ -220,6 +234,20 @@ impl PuncherService for PuncherServer {
 		sessions.insert(session.id, session);
 		
 		Ok(Response::new(CreateSessionResponse {session_id}))
+	}
+
+	async fn end_session(
+		&self,
+		request: Request<EndSessionRequest>,
+	) -> Result<Response<EndSessionResponse>, Status> {
+		let request = request.into_inner();
+
+		let session_id = request.session_id.parse::<Uuid>()
+			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
+
+		self.remove_deep(&[session_id]).await;
+
+		Ok(Response::new(EndSessionResponse {}))
 	}
 
 	async fn ping(

@@ -8,6 +8,7 @@ service PuncherService {
 	rpc GetListings (GetListingsRequest) returns (GetListingsResponse);
 	rpc Ping (PingRequest) returns (PingResponse);
 	rpc CreateSession (CreateSessionRequest) returns (CreateSessionResponse);
+	rpc EndSession (EndSessionRequest) returns (EndSessionResponse);
 }
 
 // -- LISTINGS -- //
@@ -57,6 +58,14 @@ message CreateSessionRequest {}
 message CreateSessionResponse {
 	string session_id = 1;
 }
+
+
+// -- EndSession --
+message EndSessionRequest {
+	string session_id = 1;
+}
+
+message EndSessionResponse {}
 
 
 // -- Ping --
