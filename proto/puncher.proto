@@ -6,9 +6,20 @@ service PuncherService {
 	rpc AddListing (AddListingRequest) returns (AddListingResponse);
 	rpc RemoveListing (RemoveListingRequest) returns (RemoveListingResponse);
 	rpc GetListings (GetListingsRequest) returns (GetListingsResponse);
+	
 	rpc Ping (PingRequest) returns (PingResponse);
 	rpc CreateSession (CreateSessionRequest) returns (CreateSessionResponse);
 	rpc EndSession (EndSessionRequest) returns (EndSessionResponse);
+	
+	rpc ForwardJoin (ForwardJoinRequest) returns (ForwardJoinResponse);
+}
+
+service PeerService {
+	rpc Join (JoinRequest) returns (JoinResponse);
+
+	rpc Punch (PunchRequest) returns (PunuchResponse);
+
+	rpc Proxy (ProxyRequest) returns (ProxyResponse);
 }
 
 // -- LISTINGS -- //
@@ -23,7 +34,9 @@ message Listing {
 }
 
 
-// ---- MESSAGES ---- //
+// -------- MESSAGES -------- //
+
+// ---- Server ---- //
 
 // -- AddListing --
 message AddListingRequest {
@@ -74,3 +87,37 @@ message PingRequest {
 }
 
 message PingResponse {}
+
+
+// -- ForwardJoin --
+message ForwardJoinRequest {
+	bytes session_id = 1;
+	bytes target_listing_id = 2;
+	TunnelRequest request = 3;
+}
+
+message ForwardJoinResponse {}
+
+// ---- Client ---- //
+
+// -- Join --
+message JoinRequest {}
+
+message JoinResponse {}
+
+
+// -- Punch --
+message PunchRequest {
+	string ip = 1;
+	uint32 port = 2;
+}
+
+message PunchResponse {}
+
+// -- Proxy --
+message ProxyRequest {
+	string proxy_ip = 1;
+	uint32 proxy_port = 2;
+}
+
+message ProxyResponse {}
