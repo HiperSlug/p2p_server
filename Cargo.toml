@@ -13,6 +13,10 @@ tonic = { version = "0.13.1", features = ["transport"] }
 prost = "0.13.5"
 rand = "0.9.1"
 
+[[bin]]
+name = "nat_puncher_server"
+path = "src/main.rs"
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
