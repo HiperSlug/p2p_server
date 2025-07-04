@@ -1,5 +1,5 @@
 use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, sync::Arc, time::{Duration, Instant}};
-use crate::puncher::{peer_service_client::PeerServiceClient, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, ForwardJoinRequest, ForwardJoinResponse, GetListingsRequest, GetListingsResponse, PingRequest, PingResponse, PunchRequest, RemoveListingRequest, RemoveListingResponse};
+use crate::puncher::{puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, ForwardJoinRequest, ForwardJoinResponse, GetListingsRequest, GetListingsResponse, PingRequest, PingResponse, PunchRequest, RemoveListingRequest, RemoveListingResponse};
 use crate::puncher::Listing as ListingPacket;
 use crate::puncher::ListingNoId as ListingNoIdPacket;
 use anyhow::{anyhow, bail, Result};
@@ -9,31 +9,25 @@ use tonic::{transport::{Channel, Server}, Request, Response, Status};
 use uuid::Uuid;
 
 // -- Session -- //
+type SessionRef = Arc<RwLock<Session>>;
+
 struct Session {
 	id: Uuid,
 	last_seen: Instant,
 	listing: Option<Listing>,
 	addr: SocketAddr,
-	client: Arc<RwLock<PeerServiceClient<Channel>>>,
 }
 
 impl Session {
-	const TIMEOUT: Duration = Duration::from_secs(30);
+	const TIMEOUT: Duration = Duration::from_secs(60 * 15);
 
-	pub async fn new(addr: SocketAddr) -> Result<Self> {
-		let uri = format!("https://{addr}").parse()?;
-
-		let channel = Channel::builder(uri)
-			.connect()
-			.await?;
-
-		Ok(Self {
+	pub async fn new(addr: SocketAddr) -> SessionRef {
+		Arc::new(RwLock::new(Self {
 			id: Uuid::new_v4(),
 			last_seen: Instant::now(),
 			listing: None,
 			addr,
-			client: Arc::new(RwLock::new(PeerServiceClient::new(channel)))
-		})
+		}))
 	}
 
 	pub fn see(&mut self) {
@@ -107,61 +101,70 @@ impl From<ListingNoId> for ListingNoIdPacket {
 // -- Server -- //
 #[derive(Default)]
 pub struct PuncherServer {
-	sessions: Arc<RwLock<HashMap<Uuid, Session>>>,
+	sessions: Arc<RwLock<HashMap<Uuid, SessionRef>>>,
 	id_map: Arc<RwLock<HashMap<Uuid, Uuid>>>,
 }
 
 impl PuncherServer {
-	async fn check(&self, session_id: &Uuid) -> Result<()> {
+	async fn get(&self, session_id: &Uuid) -> Option<SessionRef> {
 		let sessions = self.sessions.read().await;
-		let session = sessions.get(session_id).ok_or(anyhow!("Not found."))?;
-		
-		if !session.is_valid() {
-			self.remove_deep(&[*session_id]).await;
+		sessions.get(session_id).map(|s| s.clone())
+	}
+
+	async fn validate(&self, session_id: &Uuid) -> Result<SessionRef> {
+		let session = self
+			.get(session_id)
+			.await
+			.ok_or(anyhow!("Not found."))?
+			.clone();
+
+		{
+			let session = session.read().await;
 			
-			bail!("Expired.")
-		} else {
-			Ok(())
+			if !session.is_valid() {
+				self.remove_deep(&[*session_id]).await;
+				
+				bail!("Expired.")
+			}
 		}
+		
+		Ok(session)
 	}
 
 	async fn remove_deep(&self, session_ids: &[Uuid]) {
 		let mut sessions = self.sessions.write().await;
+
 		let removed_sessions = session_ids
 			.iter()
 			.filter_map(|id| sessions.remove(id))
-			.collect::<Vec<Session>>();
+			.collect::<Vec<SessionRef>>();
 		
 		let mut id_map = self.id_map.write().await;
-		removed_sessions
-			.iter()
-			.for_each(|s| {
-				if let Some(listing) = s.listing.as_ref() {
-					id_map.remove(&listing.id);
-				}
-			});
+		for session in removed_sessions {
+			let session = session.write().await;
+
+			if let Some(listing) = session.listing.as_ref() {
+				id_map.remove(&listing.id);
+			}
+		}
 	}
 
-	async fn cleanup(&self) {
-		let expired = {
-			let sessions = self.sessions.read().await;
-			sessions
-				.iter()
-				.filter(|(_, s)| !s.is_valid())
-				.map(|(id, _)| *id)
-				.collect::<Vec<Uuid>>()
+	async fn remove_expired(&self) {
+		let sessions = self.sessions.read().await;
+		let mut expired = Vec::new();
+		for (id, session) in sessions.iter() {
+			let session = session.read().await;
+			if !session.is_valid() {
+				expired.push(id.clone());
+			}
 		};
-
-		if expired.is_empty() {
-			return;
-		}
 
 		self.remove_deep(&expired).await;
 	}
 
-	pub async fn cleanup_chance(&self) { // I couldnt be bothered to spawn and despawn an async task.
+	pub async fn remove_expired_chance(&self) {
 		if random::<f32>() < 0.1 {
-			self.cleanup().await;
+			self.remove_expired().await;
 		}
 	}
 }
@@ -173,37 +176,48 @@ impl PuncherService for PuncherServer {
         &self,
         request: Request<AddListingRequest>,
     ) -> Result<Response<AddListingResponse>, Status> {
-		self.cleanup_chance().await;
+		self.remove_expired_chance().await;
 
 		let request = request.into_inner();
+		
 
 		// validate session //
-		let session_id = request.session_id.try_into()
+		let session_id = request
+			.session_id
+			.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
 
-		self.check(&session_id).await.map_err(|e| Status::invalid_argument(format!("Invalid session_id: {e}")))?;
-
-		let mut sessions = self.sessions.write().await;
-		let session = sessions.get_mut(&session_id)
-			.ok_or(Status::internal("Session ID expired or non-existent (after session validation)"))?;
+		let session = self
+			.validate(&session_id)
+			.await
+			.map_err(|e| Status::invalid_argument(format!("Invalid session_id: {e}")))?;
+		
 
 		// validate assignment //
-		if session.listing.is_some() {
-			return Err(Status::already_exists("This session already has an associated listing."))
+		{
+			let session = session.read().await;
+			if session.listing.is_some() {
+				return Err(Status::already_exists("This session already has an associated listing."))
+			}
 		}
 
-		// assignment //
+
+		// generate listing //
 		let listing_no_id_packet = request
 			.listing
 			.ok_or(Status::invalid_argument("No supplied listing."))?;
 		let listing = Listing::new(listing_no_id_packet.into());
 		
+
+		// assign listing //
 		let mut id_map = self.id_map.write().await;
 		id_map.insert(listing.id, session_id);
 
 		let listing_id = listing.id.into();
 
+		let mut session = session.write().await;
 		session.listing = Some(listing);
+
 
 		Ok(Response::new(AddListingResponse { listing_id }))
     }
@@ -212,21 +226,24 @@ impl PuncherService for PuncherServer {
         &self,
         request: Request<RemoveListingRequest>,
     ) -> Result<Response<RemoveListingResponse>, Status> {
-		self.cleanup_chance().await;
+		self.remove_expired_chance().await;
 
         let request = request.into_inner();
 
+		
 		// validate session //
 		let session_id = request.session_id.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
 
-		self.check(&session_id).await.map_err(|e| Status::invalid_argument(format!("Invalid session_id: {e}")))?;
+		let session = self
+			.validate(&session_id)
+			.await
+			.map_err(|e| Status::invalid_argument(format!("Invalid session_id: {e}")))?;
 
-		let mut sessions = self.sessions.write().await;
-		let session = sessions.get_mut(&session_id)
-			.ok_or(Status::internal("Session ID expired or non-existent (after session validation)"))?;
-
+		
 		// assignment //
+		let mut session = session.write().await;
+
 		if let Some(listing) = session.listing.as_ref() {
 			let mut id_map = self.id_map.write().await;
 			id_map.remove(&listing.id);
@@ -241,13 +258,18 @@ impl PuncherService for PuncherServer {
         &self,
         _: Request<GetListingsRequest>,
     ) -> Result<Response<GetListingsResponse>, Status> {
-		self.cleanup_chance().await;
+		self.remove_expired_chance().await;
+
 
         let sessions = self.sessions.read().await;
-		let listings = sessions
-			.iter()
-			.filter_map(|(_, s)| s.listing.as_ref().map(|l| l.into()))
-			.collect::<Vec<ListingPacket>>();
+		let mut listings = Vec::new();
+		for (_, session) in sessions.iter() {
+			let session = session.read().await;
+			if let Some(listing) = session.listing.as_ref() {
+				listings.push(listing.into());
+			}
+		}
+
 		Ok(Response::new(GetListingsResponse { listings }))
     }
 
@@ -256,8 +278,12 @@ impl PuncherService for PuncherServer {
 		&self,
 		request: Request<CreateSessionRequest>,
 	) -> Result<Response<CreateSessionResponse>, Status> {
+		self.remove_expired_chance().await;
+
 		let request = request.into_inner();
-		
+
+
+		// parse addr //
 		let ip = request
 			.ip
 			.parse()
@@ -268,25 +294,33 @@ impl PuncherService for PuncherServer {
 			.map_err(|e| Status::invalid_argument(format!("Invalid port: {e}")) )?;
 		let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
 
-		let session = Session::new(addr)
-			.await
-			.map_err(|e| Status::internal(format!("Unable to parse addr despite having already parsed addr: {e}")))?;
+
+		// create session //
+		let session = Session::new(addr).await;
 		
-		let session_id = session.id.into();
+		let session_id = {
+			let session = session.read().await;
+			session.id
+		};
+
+		let session_id_bytes = session_id.into();
 
 		let mut sessions = self.sessions.write().await;
-		sessions.insert(session.id, session);
+		sessions.insert(session_id, session.into());
 		
-		Ok(Response::new(CreateSessionResponse {session_id}))
+		Ok(Response::new(CreateSessionResponse { session_id: session_id_bytes }))
 	}
 
 	async fn end_session(
 		&self,
 		request: Request<EndSessionRequest>,
 	) -> Result<Response<EndSessionResponse>, Status> {
-		let request = request.into_inner();
+		self.remove_expired_chance().await;
 
-		let session_id = request.session_id.try_into()
+		let session_id = request
+			.into_inner()
+			.session_id
+			.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
 
 		self.remove_deep(&[session_id]).await;
@@ -304,15 +338,19 @@ impl PuncherService for PuncherServer {
 			.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
 
-		let mut sessions = self.sessions.write().await;
-		let session = sessions.get_mut(&session_id).ok_or(Status::invalid_argument("Session ID expired or non-existent."))?;
+		let session = self
+			.get(&session_id)
+			.await
+			.ok_or(Status::invalid_argument("Session ID expired or non-existent."))?;
+		
+		let mut session = session.write().await;
 
 		session.see();
 
 		Ok(Response::new(PingResponse {}))
 	}
 
-	async fn forward_join(
+	async fn join(
 		&self,
 		request: Request<ForwardJoinRequest>
 	) -> Result<Response<ForwardJoinResponse>, Status> {
