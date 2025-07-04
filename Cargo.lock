@@ -640,6 +640,7 @@ dependencies = [
  "prost",
  "rand",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "uuid",

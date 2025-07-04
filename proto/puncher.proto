@@ -8,7 +8,7 @@ service PuncherService {
 	rpc GetListings (GetListingsRequest) returns (GetListingsResponse);
 	
 	rpc CreateSession (CreateSessionRequest) returns (CreateSessionResponse);
-	rpc StartSession (StartSessionRequest) returns (stream StreamOrder);
+	rpc StreamSession (stream Ping) returns (stream Order);
 	rpc EndSession (EndSessionRequest) returns (EndSessionResponse);
 
 	rpc Join (JoinRequest) returns (JoinResponse);
@@ -66,11 +66,30 @@ message CreateSessionResponse {
 }
 
 
-// -- StartSession -- 
-message StartSessionRequest {
-	bytes session_id = 1;
+// -- StreamSession -- 
+
+// Ping
+message Ping {
+	optional bytes session_id = 1; // only required first ping
 }
 
+// Order
+message Order {
+	oneof order {
+		Punch punch = 1;
+		Proxy proxy = 2;
+	}
+}
+
+message Punch {
+	string ip = 1;
+	uint32 port = 2;
+}
+
+message Proxy {
+	string ip = 1;
+	uint32 port = 2;
+}
 
 // -- EndSession --
 message EndSessionRequest {
@@ -89,20 +108,3 @@ message JoinRequest {
 message JoinResponse {}
 
 
-// -- StreamOrder --
-message StreamOrder {
-	oneof order {
-		Punch punch = 1;
-		Proxy proxy = 2;
-	}
-}
-
-message Punch {
-	string ip = 1;
-	uint32 port = 2;
-}
-
-message Proxy {
-	string ip = 1;
-	uint32 port = 2;
-}

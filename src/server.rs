@@ -1,21 +1,25 @@
-use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, sync::Arc, time::{Duration, Instant}};
-use crate::puncher::{puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, ForwardJoinRequest, ForwardJoinResponse, GetListingsRequest, GetListingsResponse, PingRequest, PingResponse, PunchRequest, RemoveListingRequest, RemoveListingResponse};
+use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, sync::Arc, time::{Duration, Instant}, pin::Pin};
+use crate::puncher::{puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, GetListingsRequest, GetListingsResponse, JoinRequest, JoinResponse, Order, Ping, RemoveListingRequest, RemoveListingResponse};
 use crate::puncher::Listing as ListingPacket;
 use crate::puncher::ListingNoId as ListingNoIdPacket;
 use anyhow::{anyhow, bail, Result};
+use futures::{Stream, StreamExt};
 use rand::random;
-use tokio::sync::RwLock;
-use tonic::{transport::{Channel, Server}, Request, Response, Status};
+use tokio::sync::{mpsc, RwLock};
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{transport::Server, Request, Response, Status, Streaming};
 use uuid::Uuid;
 
 // -- Session -- //
 type SessionRef = Arc<RwLock<Session>>;
+type OrderStream = mpsc::Sender<Result<Order, Status>>;
 
 struct Session {
 	id: Uuid,
+	addr: SocketAddr,
 	last_seen: Instant,
 	listing: Option<Listing>,
-	addr: SocketAddr,
+	stream: Option<OrderStream>,
 }
 
 impl Session {
@@ -26,6 +30,7 @@ impl Session {
 			id: Uuid::new_v4(),
 			last_seen: Instant::now(),
 			listing: None,
+			stream: None,
 			addr,
 		}))
 	}
@@ -106,6 +111,8 @@ pub struct PuncherServer {
 }
 
 impl PuncherServer {
+	
+
 	async fn get(&self, session_id: &Uuid) -> Option<SessionRef> {
 		let sessions = self.sessions.read().await;
 		sessions.get(session_id).map(|s| s.clone())
@@ -169,8 +176,11 @@ impl PuncherServer {
 	}
 }
 
+
 #[tonic::async_trait]
 impl PuncherService for PuncherServer {
+	type StreamSessionStream = Pin<Box<dyn Stream<Item = Result<Order, Status>> + Send + Sync + 'static>>;
+
 	// -- listings -- //
 	async fn add_listing(
         &self,
@@ -180,7 +190,6 @@ impl PuncherService for PuncherServer {
 
 		let request = request.into_inner();
 		
-
 		// validate session //
 		let session_id = request
 			.session_id
@@ -311,6 +320,48 @@ impl PuncherService for PuncherServer {
 		Ok(Response::new(CreateSessionResponse { session_id: session_id_bytes }))
 	}
 
+	async fn stream_session(
+		&self,
+		request: Request<Streaming<Ping>>,
+	) -> Result<Response<Self::StreamSessionStream>, Status> {
+		let mut request = request.into_inner();
+
+		let session_id = request
+			.message()
+			.await?
+			.ok_or(Status::invalid_argument("No first ping."))?
+			.session_id
+			.ok_or(Status::invalid_argument("No session_id in first ping."))?
+			.try_into()
+			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
+		
+		let session = self
+			.get(&session_id)
+			.await
+			.ok_or(Status::invalid_argument("Session ID points to no session."))?;
+
+		let (tx, rx) = mpsc::channel(32);
+		
+		
+		let s = session.clone();
+		tokio::spawn(async move {
+			while let Some(ping_result) = request.next().await {
+				if let Ok(_) = ping_result {
+					let mut session = s.write().await;
+					session.see();
+				} else {
+					break;
+				}
+			}
+		});
+
+		let mut session = session.write().await;
+		session.stream = Some(tx);
+
+		let stream = Box::pin(ReceiverStream::new(rx));
+		Ok(Response::new(stream))
+	}
+
 	async fn end_session(
 		&self,
 		request: Request<EndSessionRequest>,
@@ -328,46 +379,26 @@ impl PuncherService for PuncherServer {
 		Ok(Response::new(EndSessionResponse {}))
 	}
 
-	async fn ping(
-		&self,
-		request: Request<PingRequest>,
-	) -> Result<Response<PingResponse>, Status> {
-		let session_id = request
-			.into_inner()
-			.session_id
-			.try_into()
-			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
-
-		let session = self
-			.get(&session_id)
-			.await
-			.ok_or(Status::invalid_argument("Session ID expired or non-existent."))?;
-		
-		let mut session = session.write().await;
-
-		session.see();
-
-		Ok(Response::new(PingResponse {}))
-	}
-
 	async fn join(
 		&self,
-		request: Request<ForwardJoinRequest>
-	) -> Result<Response<ForwardJoinResponse>, Status> {
+		request: Request<JoinRequest>
+	) -> Result<Response<JoinResponse>, Status> {
 		let request = request.into_inner();
-		
-		let join_request = request.request
-			.ok_or(Status::invalid_argument("No join request supplied."))?;
 
 		// validate session //
 		let session_id = request.session_id.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid session Uuid: {e}")))?;
 
-		self.check(&session_id).await.map_err(|e| Status::invalid_argument(format!("Invalid session id: {e}")))?;
+		let session = self
+			.validate(&session_id)
+			.await
+			.map_err(|e| Status::invalid_argument(format!("Invalid session id: {e}")))?;
 
 
 		// validate target session //
-		let target_listing_id = request.target_listing_id.try_into()
+		let target_listing_id = request
+			.target_listing_id
+			.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid listing Uuid: {e}")))?;
 		
 		let id_map = self.id_map.read().await;
@@ -376,71 +407,16 @@ impl PuncherService for PuncherServer {
 			.ok_or(Status::invalid_argument("Listing ID has no associated session."))?
 			.clone();
 
-		self.check(&target_session_id).await.map_err(|e| Status::invalid_argument(format!("Invalid target session id: {e}")))?;
+		let target_session = self
+			.validate(&target_session_id)
+			.await
+			.map_err(|e| Status::invalid_argument(format!("Invalid session id: {e}")))?;
 
-		// forward request to target //
-		let target_client = {
-			let sessions = self.sessions.read().await;
-			sessions
-				.get(&target_session_id)
-				.ok_or(Status::internal("Target session non existent despite having a respective map."))?
-				.client.clone()
-		};
+		// TODO send Punch order
 
-		{
-			let mut target_client = target_client.write().await;
+		// TODO handle Proxy fallback		
 
-			// return err response, can be changed to handle custom data later
-			let _ = target_client.join(join_request).await?;
-		}
-		
-		let joining_client = {
-			let sessions = self.sessions.read().await;
-			sessions
-				.get(&session_id)
-				.ok_or(Status::internal("Target session non existent despite having a respective map."))?
-				.client.clone()
-		};
-
-		// getting addr
-		let target_addr = {
-			let sessions = self.sessions.read().await;
-			let session = sessions.get(&target_session_id).ok_or(Status::internal("Invalid session after session validation."))?;
-			session.addr
-		};
-		let joining_addr = {
-			let sessions = self.sessions.read().await;
-			let session = sessions.get(&session_id).ok_or(Status::internal("Invalid session after session validation."))?;
-			session.addr
-		};
-
-		// punch
-		let (target_response, joining_response) = tokio::join!(
-			async {
-				let (ip, port) = { (joining_addr.ip().to_string(), joining_addr.port().into()) };
-				let target_client = target_client.clone();
-				let mut target_client = target_client.write().await;
-
-				target_client.punch(PunchRequest { ip, port }).await
-			},
-			async {
-				let (ip, port) = { (target_addr.ip().to_string(), target_addr.port().into()) };
-				let joining_client = joining_client.clone();
-				let mut joining_client = joining_client.write().await;
-
-				joining_client.punch(PunchRequest { ip, port }).await
-				}
-		);
-
-		if target_response.is_ok() && joining_response.is_ok() {
-			return Ok(Response::new(ForwardJoinResponse { }))
-		}
-
-		// punch failed -- proxy fallback
-		
-		// TODO		
-
-		Ok(Response::new(ForwardJoinResponse { }))
+		Ok(Response::new(JoinResponse { }))
 	}
 }
 
