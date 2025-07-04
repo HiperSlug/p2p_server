@@ -7,13 +7,11 @@ service PuncherService {
 	rpc RemoveListing (RemoveListingRequest) returns (RemoveListingResponse);
 	rpc GetListings (GetListingsRequest) returns (GetListingsResponse);
 	
-	rpc Ping (PingRequest) returns (PingResponse);
 	rpc CreateSession (CreateSessionRequest) returns (CreateSessionResponse);
+	rpc StartSession (StartSessionRequest) returns (stream StreamOrder);
 	rpc EndSession (EndSessionRequest) returns (EndSessionResponse);
-	
-	rpc Join (JoinRequest) returns (JoinResponse);
 
-	rpc StreamOrders (StreamOrdersRequest) returns (stream StreamOrder);
+	rpc Join (JoinRequest) returns (JoinResponse);
 }
 
 // -- LISTINGS -- //
@@ -29,8 +27,6 @@ message Listing {
 
 
 // -------- MESSAGES -------- //
-
-// ---- Server ---- //
 
 // -- AddListing --
 message AddListingRequest {
@@ -70,20 +66,18 @@ message CreateSessionResponse {
 }
 
 
+// -- StartSession -- 
+message StartSessionRequest {
+	bytes session_id = 1;
+}
+
+
 // -- EndSession --
 message EndSessionRequest {
 	bytes session_id = 1;
 }
 
 message EndSessionResponse {}
-
-
-// -- Ping --
-message PingRequest {
-	bytes session_id = 1;
-}
-
-message PingResponse {}
 
 
 // -- Join --
@@ -95,9 +89,7 @@ message JoinRequest {
 message JoinResponse {}
 
 
-// -- StreamOrders --
-message StreamOrdersRequest {}
-
+// -- StreamOrder --
 message StreamOrder {
 	oneof order {
 		Punch punch = 1;
