@@ -1,18 +1,18 @@
 use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, sync::Arc, time::{Duration, Instant}, pin::Pin};
-use crate::puncher::{puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, GetListingsRequest, GetListingsResponse, JoinRequest, JoinResponse, Order, Ping, RemoveListingRequest, RemoveListingResponse};
+use crate::puncher::{order::Order as OrderEnum, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, GetListingsRequest, GetListingsResponse, JoinRequest, JoinResponse, Order as OrderMessage, Ping, Punch, RemoveListingRequest, RemoveListingResponse};
 use crate::puncher::Listing as ListingPacket;
 use crate::puncher::ListingNoId as ListingNoIdPacket;
 use anyhow::{anyhow, bail, Result};
 use futures::{Stream, StreamExt};
 use rand::random;
-use tokio::sync::{mpsc, RwLock};
+use tokio::{join, sync::{mpsc, RwLock}};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status, Streaming};
 use uuid::Uuid;
 
 // -- Session -- //
 type SessionRef = Arc<RwLock<Session>>;
-type OrderStream = mpsc::Sender<Result<Order, Status>>;
+type OrderStream = mpsc::Sender<Result<OrderMessage, Status>>;
 
 struct Session {
 	id: Uuid,
@@ -40,6 +40,10 @@ impl Session {
 	}
 
 	pub fn is_valid(&self) -> bool {
+		self.is_timeout() && self.stream.is_some()
+	}
+
+	pub fn is_timeout(&self) -> bool {
 		self.last_seen.elapsed() < Self::TIMEOUT
 	}
 }
@@ -179,7 +183,7 @@ impl PuncherServer {
 
 #[tonic::async_trait]
 impl PuncherService for PuncherServer {
-	type StreamSessionStream = Pin<Box<dyn Stream<Item = Result<Order, Status>> + Send + Sync + 'static>>;
+	type StreamSessionStream = Pin<Box<dyn Stream<Item = Result<OrderMessage, Status>> + Send + Sync + 'static>>;
 
 	// -- listings -- //
 	async fn add_listing(
@@ -358,7 +362,7 @@ impl PuncherService for PuncherServer {
 		let mut session = session.write().await;
 		session.stream = Some(tx);
 
-		let stream = Box::pin(ReceiverStream::new(rx));
+		let stream = Box::pin(ReceiverStream::new(rx)) as Self::StreamSessionStream;
 		Ok(Response::new(stream))
 	}
 
@@ -412,7 +416,57 @@ impl PuncherService for PuncherServer {
 			.await
 			.map_err(|e| Status::invalid_argument(format!("Invalid session id: {e}")))?;
 
-		// TODO send Punch order
+
+		// send both clients punch orders //
+
+		let (target_ip, target_port) = {
+			let target_session = target_session.write().await;
+			let addr = target_session.addr;
+			(addr.ip().to_string(), addr.port().into())
+		};
+
+		let (ip, port) = {
+			let session = session.write().await;
+			let addr = session.addr;
+			(addr.ip().to_string(), addr.port().into())
+		};
+
+
+		let (resp, target_resp): (Result<()>, Result<()>) = join!(
+			async move {
+				let session = session.read().await;
+				let stream = session.stream.as_ref().ok_or(anyhow!("No stream found on a validated session."))?;
+
+				let order = Ok(OrderMessage {
+					order: Some(OrderEnum::Punch(Punch {
+						ip: target_ip,
+						port: target_port,
+					})),
+				});
+
+				stream.send(order);
+				Ok(())
+			},
+
+			async move {
+				let target_session = target_session.read().await;
+				let stream = target_session.stream.as_ref().ok_or(anyhow!("No stream found on a validated session."))?;
+
+				let order = Ok(OrderMessage {
+					order: Some(OrderEnum::Punch(Punch {
+						ip: ip,
+						port: port,
+					})),
+				});
+
+				stream.send(order);
+				Ok(())
+			},
+		);
+
+		if resp.is_ok() && target_resp.is_ok() {
+			return Ok(Response::new(JoinResponse { }));
+		}
 
 		// TODO handle Proxy fallback		
 
