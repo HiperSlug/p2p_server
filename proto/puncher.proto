@@ -11,15 +11,9 @@ service PuncherService {
 	rpc CreateSession (CreateSessionRequest) returns (CreateSessionResponse);
 	rpc EndSession (EndSessionRequest) returns (EndSessionResponse);
 	
-	rpc ForwardJoin (ForwardJoinRequest) returns (ForwardJoinResponse);
-}
-
-service PeerService {
 	rpc Join (JoinRequest) returns (JoinResponse);
 
-	rpc Punch (PunchRequest) returns (PunchResponse);
-
-	rpc Proxy (ProxyRequest) returns (ProxyResponse);
+	rpc StreamOrders (StreamOrdersRequest) returns (stream StreamOrder);
 }
 
 // -- LISTINGS -- //
@@ -92,35 +86,31 @@ message PingRequest {
 message PingResponse {}
 
 
-// -- ForwardJoin --
-message ForwardJoinRequest {
+// -- Join --
+message JoinRequest {
 	bytes session_id = 1;
 	bytes target_listing_id = 2;
-	JoinRequest request = 3;
 }
-
-message ForwardJoinResponse {}
-
-// ---- Client ---- //
-
-// -- Join --
-message JoinRequest {}
 
 message JoinResponse {}
 
 
-// -- Punch --
-message PunchRequest {
+// -- StreamOrders --
+message StreamOrdersRequest {}
+
+message StreamOrder {
+	oneof order {
+		Punch punch = 1;
+		Proxy proxy = 2;
+	}
+}
+
+message Punch {
 	string ip = 1;
 	uint32 port = 2;
 }
 
-message PunchResponse {}
-
-// -- Proxy --
-message ProxyRequest {
-	string proxy_ip = 1;
-	uint32 proxy_port = 2;
+message Proxy {
+	string ip = 1;
+	uint32 port = 2;
 }
-
-message ProxyResponse {}
