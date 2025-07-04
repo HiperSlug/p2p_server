@@ -40,11 +40,11 @@ impl Session {
 	}
 
 	pub fn is_valid(&self) -> bool {
-		self.is_timeout() && self.stream.is_some()
+		!self.is_timed_out() && self.stream.is_some()
 	}
 
-	pub fn is_timeout(&self) -> bool {
-		self.last_seen.elapsed() < Self::TIMEOUT
+	pub fn is_timed_out(&self) -> bool {
+		self.last_seen.elapsed() > Self::TIMEOUT
 	}
 }
 
@@ -126,8 +126,7 @@ impl PuncherServer {
 		let session = self
 			.get(session_id)
 			.await
-			.ok_or(anyhow!("Not found."))?
-			.clone();
+			.ok_or(anyhow!("Not found."))?;
 
 		{
 			let session = session.read().await;
@@ -160,12 +159,12 @@ impl PuncherServer {
 		}
 	}
 
-	async fn remove_expired(&self) {
+	async fn remove_timed_out(&self) {
 		let sessions = self.sessions.read().await;
 		let mut expired = Vec::new();
 		for (id, session) in sessions.iter() {
 			let session = session.read().await;
-			if !session.is_valid() {
+			if session.is_timed_out() {
 				expired.push(id.clone());
 			}
 		};
@@ -173,9 +172,9 @@ impl PuncherServer {
 		self.remove_deep(&expired).await;
 	}
 
-	pub async fn remove_expired_chance(&self) {
+	pub async fn remove_timed_out_chance(&self) {
 		if random::<f32>() < 0.1 {
-			self.remove_expired().await;
+			self.remove_timed_out().await;
 		}
 	}
 }
@@ -190,7 +189,7 @@ impl PuncherService for PuncherServer {
         &self,
         request: Request<AddListingRequest>,
     ) -> Result<Response<AddListingResponse>, Status> {
-		self.remove_expired_chance().await;
+		self.remove_timed_out_chance().await;
 
 		let request = request.into_inner();
 		
@@ -239,7 +238,7 @@ impl PuncherService for PuncherServer {
         &self,
         request: Request<RemoveListingRequest>,
     ) -> Result<Response<RemoveListingResponse>, Status> {
-		self.remove_expired_chance().await;
+		self.remove_timed_out_chance().await;
 
         let request = request.into_inner();
 
@@ -271,7 +270,7 @@ impl PuncherService for PuncherServer {
         &self,
         _: Request<GetListingsRequest>,
     ) -> Result<Response<GetListingsResponse>, Status> {
-		self.remove_expired_chance().await;
+		self.remove_timed_out_chance().await;
 
 
         let sessions = self.sessions.read().await;
@@ -291,7 +290,7 @@ impl PuncherService for PuncherServer {
 		&self,
 		request: Request<CreateSessionRequest>,
 	) -> Result<Response<CreateSessionResponse>, Status> {
-		self.remove_expired_chance().await;
+		self.remove_timed_out_chance().await;
 
 		let request = request.into_inner();
 
@@ -370,7 +369,7 @@ impl PuncherService for PuncherServer {
 		&self,
 		request: Request<EndSessionRequest>,
 	) -> Result<Response<EndSessionResponse>, Status> {
-		self.remove_expired_chance().await;
+		self.remove_timed_out_chance().await;
 
 		let session_id = request
 			.into_inner()
