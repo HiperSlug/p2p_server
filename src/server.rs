@@ -1,11 +1,11 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::{Duration, Instant}};
-use crate::puncher::{puncher_service_client::PuncherServiceClient, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, GetListingsRequest, GetListingsResponse, PingRequest, PingResponse, RemoveListingRequest, RemoveListingResponse};
+use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, sync::Arc, time::{Duration, Instant}};
+use crate::puncher::{peer_service_client::PeerServiceClient, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, ForwardJoinRequest, ForwardJoinResponse, GetListingsRequest, GetListingsResponse, PingRequest, PingResponse, PunchRequest, RemoveListingRequest, RemoveListingResponse};
 use crate::puncher::Listing as ListingPacket;
 use crate::puncher::ListingNoId as ListingNoIdPacket;
 use anyhow::{anyhow, bail, Result};
 use rand::random;
-use tokio::{sync::RwLock, time::sleep};
-use tonic::{transport::Server, Request, Response, Status};
+use tokio::sync::RwLock;
+use tonic::{transport::{Channel, Server}, Request, Response, Status};
 use uuid::Uuid;
 
 // -- Session -- //
@@ -13,17 +13,27 @@ struct Session {
 	id: Uuid,
 	last_seen: Instant,
 	listing: Option<Listing>,
+	addr: SocketAddr,
+	client: Arc<RwLock<PeerServiceClient<Channel>>>,
 }
 
 impl Session {
 	const TIMEOUT: Duration = Duration::from_secs(30);
 
-	pub fn new() -> Self {
-		Self {
+	pub async fn new(addr: SocketAddr) -> Result<Self> {
+		let uri = format!("https://{addr}").parse()?;
+
+		let channel = Channel::builder(uri)
+			.connect()
+			.await?;
+
+		Ok(Self {
 			id: Uuid::new_v4(),
 			last_seen: Instant::now(),
 			listing: None,
-		}
+			addr,
+			client: Arc::new(RwLock::new(PeerServiceClient::new(channel)))
+		})
 	}
 
 	pub fn see(&mut self) {
@@ -244,9 +254,23 @@ impl PuncherService for PuncherServer {
 	// -- connection -- //
 	async fn create_session(
 		&self,
-		_: Request<CreateSessionRequest>,
+		request: Request<CreateSessionRequest>,
 	) -> Result<Response<CreateSessionResponse>, Status> {
-		let session = Session::new();
+		let request = request.into_inner();
+		
+		let ip = request
+			.ip
+			.parse()
+			.map_err(|e| Status::invalid_argument(format!("Invalid ip: {e}")))?;
+		let port = request
+			.port
+			.try_into()
+			.map_err(|e| Status::invalid_argument(format!("Invalid port: {e}")) )?;
+		let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
+
+		let session = Session::new(addr)
+			.await
+			.map_err(|e| Status::internal(format!("Unable to parse addr despite having already parsed addr: {e}")))?;
 		
 		let session_id = session.id.into();
 
@@ -287,11 +311,102 @@ impl PuncherService for PuncherServer {
 
 		Ok(Response::new(PingResponse {}))
 	}
+
+	async fn forward_join(
+		&self,
+		request: Request<ForwardJoinRequest>
+	) -> Result<Response<ForwardJoinResponse>, Status> {
+		let request = request.into_inner();
+		
+		let join_request = request.request
+			.ok_or(Status::invalid_argument("No join request supplied."))?;
+
+		// validate session //
+		let session_id = request.session_id.try_into()
+			.map_err(|e| Status::invalid_argument(format!("Invalid session Uuid: {e}")))?;
+
+		self.check(&session_id).await.map_err(|e| Status::invalid_argument(format!("Invalid session id: {e}")))?;
+
+
+		// validate target session //
+		let target_listing_id = request.target_listing_id.try_into()
+			.map_err(|e| Status::invalid_argument(format!("Invalid listing Uuid: {e}")))?;
+		
+		let id_map = self.id_map.read().await;
+		let target_session_id = id_map
+			.get(&target_listing_id)
+			.ok_or(Status::invalid_argument("Listing ID has no associated session."))?
+			.clone();
+
+		self.check(&target_session_id).await.map_err(|e| Status::invalid_argument(format!("Invalid target session id: {e}")))?;
+
+		// forward request to target //
+		let target_client = {
+			let sessions = self.sessions.read().await;
+			sessions
+				.get(&target_session_id)
+				.ok_or(Status::internal("Target session non existent despite having a respective map."))?
+				.client.clone()
+		};
+
+		{
+			let mut target_client = target_client.write().await;
+
+			// return err response, can be changed to handle custom data later
+			let _ = target_client.join(join_request).await?;
+		}
+		
+		let joining_client = {
+			let sessions = self.sessions.read().await;
+			sessions
+				.get(&session_id)
+				.ok_or(Status::internal("Target session non existent despite having a respective map."))?
+				.client.clone()
+		};
+
+		// getting addr
+		let target_addr = {
+			let sessions = self.sessions.read().await;
+			let session = sessions.get(&target_session_id).ok_or(Status::internal("Invalid session after session validation."))?;
+			session.addr
+		};
+		let joining_addr = {
+			let sessions = self.sessions.read().await;
+			let session = sessions.get(&session_id).ok_or(Status::internal("Invalid session after session validation."))?;
+			session.addr
+		};
+
+		// punch
+		let (target_response, joining_response) = tokio::join!(
+			async {
+				let (ip, port) = { (joining_addr.ip().to_string(), joining_addr.port().into()) };
+				let target_client = target_client.clone();
+				let mut target_client = target_client.write().await;
+
+				target_client.punch(PunchRequest { ip, port }).await
+			},
+			async {
+				let (ip, port) = { (target_addr.ip().to_string(), target_addr.port().into()) };
+				let joining_client = joining_client.clone();
+				let mut joining_client = joining_client.write().await;
+
+				joining_client.punch(PunchRequest { ip, port }).await
+				}
+		);
+
+		if target_response.is_ok() && joining_response.is_ok() {
+			return Ok(Response::new(ForwardJoinResponse { }))
+		}
+
+		// punch failed -- proxy fallback
+		
+		// TODO		
+
+		Ok(Response::new(ForwardJoinResponse { }))
+	}
 }
 
 pub async fn run() -> anyhow::Result<()> {
-    dummy_client();
-
 	let addr: SocketAddr = "127.0.0.1:3000".parse().unwrap();
 	let server = PuncherServer::default();
 
@@ -302,31 +417,3 @@ pub async fn run() -> anyhow::Result<()> {
 	
 	Ok(())
 }
-
-fn dummy_client() {
-	tokio::spawn(async move {
-        let mut client = PuncherServiceClient::connect("https://localhost:3000").await.unwrap();
-        
-		let session_id =client
-			.create_session(CreateSessionRequest {})
-			.await
-			.unwrap()
-			.into_inner()
-			.session_id;
-        
-        loop {
-            sleep(Duration::from_secs(1)).await;
-            let request: Request<AddListingRequest> = Request::new(AddListingRequest {
-				session_id: session_id.clone(),
-                listing: Some(ListingNoIdPacket {
-					name: "Raphael".to_string(),
-				}),
-            });
-
-            match client.add_listing(request).await {
-				Ok(resp) => println!("Response = {resp:?}"),
-				Err(e) => eprintln!("Err: {e}")
-			};
-        }
-    });
-} 

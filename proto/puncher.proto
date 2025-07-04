@@ -66,7 +66,10 @@ message GetListingsResponse {
 
 
 // -- CreateSession --
-message CreateSessionRequest {}
+message CreateSessionRequest {
+	string ip = 1;
+	uint32 port = 2;
+}
 
 message CreateSessionResponse {
 	bytes session_id = 1;
