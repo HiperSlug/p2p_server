@@ -8,7 +8,7 @@ service PuncherService {
 	rpc GetListings (GetListingsRequest) returns (GetListingsResponse);
 	
 	rpc CreateSession (CreateSessionRequest) returns (CreateSessionResponse);
-	rpc StreamSession (stream Ping) returns (stream Order);
+	rpc StreamSession (stream ClientStatus) returns (stream Order);
 	rpc EndSession (EndSessionRequest) returns (EndSessionResponse);
 
 	rpc Join (JoinRequest) returns (JoinResponse);
@@ -51,7 +51,7 @@ message RemoveListingResponse {}
 message GetListingsRequest {}
 
 message GetListingsResponse {
-	repeated Listing listings = 2;
+	repeated Listing listings = 1;
 }
 
 
@@ -68,9 +68,20 @@ message CreateSessionResponse {
 
 // -- StreamSession -- 
 
-// Ping
-message Ping {
-	optional bytes session_id = 1; // only required first ping
+// Status
+message ClientStatus {
+	optional bytes session_id = 1; // required in first status
+	oneof status {
+		Ping ping = 2; // keep alive
+		PunchStatus punch_status = 3;
+	}
+}
+
+message Ping {}
+
+message PunchStatus {
+	optional string message = 1;
+	bool success = 2;
 }
 
 // Order

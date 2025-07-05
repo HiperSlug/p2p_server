@@ -443,7 +443,7 @@ impl PuncherService for PuncherServer {
 					})),
 				});
 
-				stream.send(order);
+				stream.send(order).await.map_err(|e| format!("Unable to send order: {e}"))?;
 				Ok(())
 			},
 
@@ -458,7 +458,7 @@ impl PuncherService for PuncherServer {
 					})),
 				});
 
-				stream.send(order);
+				stream.send(order).await.map_err(|e| format!("Unable to send order: {e}"))?;
 				Ok(())
 			},
 		);
