@@ -2,7 +2,8 @@ use crate::{client::Client, puncher::puncher_service_server::PuncherServiceServe
 use anyhow::Result;
 use tokio::{net::TcpListener, sync::oneshot::Sender};
 use tonic::transport::Server;
-use std::{net::{SocketAddr, SocketAddrV4}, str::FromStr, time::{Duration, Instant}};use crate::puncher::{AddListingRequest, GetListingsRequest, RemoveListingRequest, ListingNoId};
+use std::{net::{SocketAddr, SocketAddrV4}, str::FromStr, time::{Duration, Instant}};
+use crate::puncher::{AddListingRequest, GetListingsRequest, RemoveListingRequest, ListingNoId};
 
 // -- SESSION -- //
 
@@ -86,9 +87,10 @@ fn test_session_timeout() {
 
 	assert_eq!(listings.get_ref().listings.len(), 1);
 	assert_eq!(listings.get_ref().listings[0].listing_no_id.as_ref().unwrap().name, name);
-	println!("test_add_and_get_listing finished successfully");
 
 	end.send(Ok(())).unwrap();
+
+	println!("test_add_and_get_listing finished successfully");
 }
 
 #[tokio::test]

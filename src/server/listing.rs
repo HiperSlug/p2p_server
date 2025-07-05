@@ -18,6 +18,8 @@ impl Listing {
 	pub fn id(&self) -> &Uuid {&self.id}
 
 	pub fn inner(&self) -> &ListingNoId {&self.listing_no_id}
+
+	pub fn into_inner(self) -> ListingNoId {self.listing_no_id}
 }
 
 impl TryFrom<ListingPacket> for Listing {
