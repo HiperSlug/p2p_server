@@ -53,6 +53,33 @@ impl PunchingClient {
 			*client = Some(new_client);
 		});
 	}
+	
+	#[func]
+	pub fn disconnect(&self) {
+
+	}
+
+	
+	#[func]
+	pub fn create_listing(&self) {
+
+	}
+
+	#[func]
+	pub fn remove_listing(&self) {
+
+	}
+	
+	#[func]
+	pub fn get_listings(&self) {
+
+	}
+
+	
+	#[func]
+	pub fn join_listing(&self) {
+		
+	}
 }
 
 

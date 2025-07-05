@@ -207,11 +207,11 @@ impl PuncherService for PuncherServer {
 
 
 		// create session //
-		let session = Session::new(addr).await;
+		let session = Session::new_ref(addr);
 		
 		let session_id = {
 			let session = session.read().await;
-			session.id
+			session.id()
 		};
 
 		let session_id_bytes = session_id.into();
@@ -255,7 +255,10 @@ impl PuncherService for PuncherServer {
 					session.see();
 
 					if let Some(status) = status.status {
-						status_tx.send(status);
+						if let Err(e) = status_tx.send(status) {
+							eprintln!("Couldnt forward status: {e}");
+							break;
+						};
 					}
 				} else {
 					break;
@@ -324,13 +327,13 @@ impl PuncherService for PuncherServer {
 
 		let (target_ip, target_port) = {
 			let target_session = target_session.write().await;
-			let addr = target_session.addr;
+			let addr = target_session.addr();
 			(addr.ip().to_string(), addr.port().into())
 		};
 
 		let (ip, port) = {
 			let session = session.write().await;
-			let addr = session.addr;
+			let addr = session.addr();
 			(addr.ip().to_string(), addr.port().into())
 		};
 

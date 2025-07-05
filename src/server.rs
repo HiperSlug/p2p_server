@@ -3,9 +3,9 @@ use crate::puncher::puncher_service_server::PuncherServiceServer;
 use tonic::transport::Server;
 
 
-mod session;
-mod listing;
-mod server;
+pub mod session;
+pub mod listing;
+pub mod server;
 
 pub async fn run() -> anyhow::Result<()> {
 	let addr: SocketAddr = "127.0.0.1:3000".parse().unwrap();
