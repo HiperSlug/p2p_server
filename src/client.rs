@@ -4,7 +4,7 @@ use godot::prelude::*;
 use tokio::{sync::{mpsc::{self, Sender}, watch, RwLock}, task::spawn_local, time::sleep};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Channel, Request};
-use crate::puncher::{puncher_service_client::PuncherServiceClient, CreateSessionRequest, Ping};
+use crate::puncher::{puncher_service_client::PuncherServiceClient, ClientStatus, CreateSessionRequest};
 
 type ThreadSafe<T> = Arc<RwLock<T>>;
 
@@ -134,7 +134,7 @@ impl Client {
 		let response = response.into_inner();
 
 		// pings //
-		ping_tx.send(Ping { session_id: Some(session_id.clone()) }).await?;
+		ping_tx.send(ClientStatus { session_id: Some(session_id.clone()), status: None }).await?;
 		
 		let (stop_tx, stop_rx) = watch::channel(false);
 
@@ -148,11 +148,11 @@ impl Client {
 }
 
 
-async fn ping(sender: Sender<Ping>, mut stopper: watch::Receiver<bool>) {
+async fn ping(sender: Sender<ClientStatus>, mut stopper: watch::Receiver<bool>) {
 	loop {
 		tokio::select! {
 			_ = sleep(Duration::from_secs(60)) => {
-				let _ = sender.send(Ping { session_id: None }).await;
+				let _ = sender.send(ClientStatus { session_id: None, status: None }).await;
 			}
 			_ = stopper.changed() => {
 				if *stopper.borrow() {
