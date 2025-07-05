@@ -36,9 +36,9 @@ impl Session {
 		Arc::new(RwLock::new(Self::new(addr)))
 	}
 
-	pub fn id(&self) -> Uuid {self.id}
+	pub fn id(&self) -> &Uuid {&self.id}
 
-	pub fn addr(&self) -> SocketAddr {self.addr}
+	pub fn addr(&self) -> &SocketAddr {&self.addr}
 
 	pub fn see(&mut self) {
 		self.last_seen = Instant::now();

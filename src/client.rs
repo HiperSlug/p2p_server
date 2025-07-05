@@ -4,6 +4,7 @@ use godot::prelude::*;
 use tokio::{sync::{mpsc::{self, Sender}, watch, RwLock}, task::spawn_local, time::sleep};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Channel, Request};
+use uuid::Uuid;
 use crate::puncher::{puncher_service_client::PuncherServiceClient, ClientStatus, CreateSessionRequest};
 
 type ThreadSafe<T> = Arc<RwLock<T>>;
@@ -48,7 +49,7 @@ impl PunchingClient {
 		let client = self.client.clone();
 
 		spawn_local(async move {
-			let new_client = Client::from(addr, server_addr).await;
+			let new_client = Client::new(addr, server_addr).await;
 			let mut client = client.write().await;
 			*client = Some(new_client);
 		});
@@ -78,22 +79,32 @@ impl PunchingClient {
 	
 	#[func]
 	pub fn join_listing(&self) {
-		
+
 	}
 }
 
 
-struct Client {
+pub struct Client {
 	client: PuncherServiceClient<Channel>,
 	session_id: Vec<u8>,
 	stop_ping: watch::Sender<bool>,
 }
 
 impl Client {
-	async fn from(
+	pub fn stop_ping(&mut self) {self.stop_ping.send(true).unwrap();}
+
+	pub fn uuid(&self) -> Uuid {Uuid::from_slice(&self.session_id[0..16]).expect("Invalid UUID bytes")}
+
+	pub fn id(&self) -> &Vec<u8> {&self.session_id}
+
+	pub fn inner_mut(&mut self) -> &mut PuncherServiceClient<Channel> {&mut self.client}
+
+	pub async fn new(
 		addr: SocketAddr, 
 		server_addr: SocketAddr
 	) -> Self {
+		println!("Creating client");
+
 		let mut client = match Self::create_client(server_addr).await {
 			Ok(c) => c,
 			Err(e) => {
@@ -101,12 +112,13 @@ impl Client {
 				panic!("Unable to create client: {e}");
 			}
 		};
+		println!("Client connected");
 
 		let request = CreateSessionRequest { 
 			ip: addr.ip().to_string(), 
 			port: addr.port().into(),
 		};
-
+		
 		let session_id = match Self::create_session(&mut client, request).await {
 			Ok(id) => id,
 			Err(e) => {
@@ -115,6 +127,8 @@ impl Client {
 			}
 		};
 
+		println!("Session created");
+
 		let stop_ping = match Self::start_session(&mut client, &session_id).await {
 			Ok(s) => s,
 			Err(e) => {
@@ -122,6 +136,8 @@ impl Client {
 				panic!("Unable to start session: {e}");
 			}
 		};
+
+		println!("Session started");
 
 		Self {
 			client,
@@ -157,18 +173,20 @@ impl Client {
 		let (ping_tx, ping_rx) = mpsc::channel(8);
 		let request = Request::new(ReceiverStream::new(ping_rx));
 		
+		ping_tx.send(ClientStatus { session_id: Some(session_id.clone()), status: None }).await?;
+
 		let response = client.stream_session(request).await?;
-		let response = response.into_inner();
+		let mut stream = response.into_inner();
 
 		// pings //
-		ping_tx.send(ClientStatus { session_id: Some(session_id.clone()), status: None }).await?;
-		
 		let (stop_tx, stop_rx) = watch::channel(false);
 
 		tokio::spawn(ping(ping_tx, stop_rx));
 	
 		// orders //
-		// TODO w/ response
+		tokio::spawn(async move {
+			while let Ok(Some(_)) = stream.message().await {}
+		});
 
 		Ok(stop_tx)
 	}

@@ -3,17 +3,21 @@ use uuid::Uuid;
 use crate::puncher::{Listing as ListingPacket, ListingNoId as ListingNoIdPacket};
 
 pub struct Listing {
-	pub listing_no_id: ListingNoId,
-	pub id: Uuid,
+	listing_no_id: ListingNoId,
+	id: Uuid,
 }
 
 impl Listing {
-	pub fn new(listing_no_id: ListingNoId) -> Listing {
+	pub fn new(listing_no_id: impl Into<ListingNoId>) -> Listing {
 		Listing {
-			listing_no_id,
+			listing_no_id: listing_no_id.into(),
 			id: Uuid::new_v4(),
 		}
 	}
+
+	pub fn id(&self) -> &Uuid {&self.id}
+
+	pub fn inner(&self) -> &ListingNoId {&self.listing_no_id}
 }
 
 impl TryFrom<ListingPacket> for Listing {
@@ -23,7 +27,7 @@ impl TryFrom<ListingPacket> for Listing {
 		Ok(Self {
 			listing_no_id: listing_packet
 				.listing_no_id
-				.ok_or(anyhow!("Empty packet."))?
+				.ok_or(anyhow!("Empty inner listing."))?
 				.into(),
 			id: listing_packet.id.try_into()?,
 		})
@@ -41,7 +45,7 @@ impl From<&Listing> for ListingPacket {
 
 #[derive(Clone)]
 pub struct ListingNoId {
-	name: String, 
+	pub name: String, 
 }
 
 impl From<ListingNoIdPacket> for ListingNoId {

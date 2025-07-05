@@ -1,14 +1,14 @@
 use godot::prelude::*;
 
-#[cfg(test)]
-mod tests;
-
 pub mod server;
 pub mod client;
 
 pub mod puncher {
 	tonic::include_proto!("puncher");
 }
+
+#[cfg(test)]
+mod tests;
 
 struct NATPuncher;
 
