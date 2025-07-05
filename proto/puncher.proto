@@ -69,15 +69,12 @@ message CreateSessionResponse {
 // -- StreamSession -- 
 
 // Status
-message ClientStatus {
+message ClientStatus { // empty status used as a keep_alive message
 	optional bytes session_id = 1; // required in first status
 	oneof status {
-		Ping ping = 2; // keep alive
 		PunchStatus punch_status = 3;
 	}
 }
-
-message Ping {}
 
 message PunchStatus {
 	optional string message = 1;

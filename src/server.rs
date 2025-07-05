@@ -1,11 +1,11 @@
 use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, sync::Arc, time::{Duration, Instant}, pin::Pin};
-use crate::puncher::{order::Order as OrderEnum, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, GetListingsRequest, GetListingsResponse, JoinRequest, JoinResponse, Order as OrderMessage, Ping, Punch, RemoveListingRequest, RemoveListingResponse};
+use crate::puncher::{client_status::Status as ClientStatusEnum, order::Order as OrderEnum, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, ClientStatus, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, GetListingsRequest, GetListingsResponse, JoinRequest, JoinResponse, Order as OrderMessage, Punch, PunchStatus, RemoveListingRequest, RemoveListingResponse};
 use crate::puncher::Listing as ListingPacket;
 use crate::puncher::ListingNoId as ListingNoIdPacket;
 use anyhow::{anyhow, bail, Result};
 use futures::{Stream, StreamExt};
 use rand::random;
-use tokio::{join, sync::{mpsc, RwLock}};
+use tokio::{join, sync::{mpsc, watch, RwLock}};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status, Streaming};
 use uuid::Uuid;
@@ -13,13 +13,14 @@ use uuid::Uuid;
 // -- Session -- //
 type SessionRef = Arc<RwLock<Session>>;
 type OrderStream = mpsc::Sender<Result<OrderMessage, Status>>;
+type StatusStream = watch::Receiver<ClientStatusEnum>;
 
 struct Session {
 	id: Uuid,
 	addr: SocketAddr,
 	last_seen: Instant,
 	listing: Option<Listing>,
-	stream: Option<OrderStream>,
+	stream: Option<(OrderStream, StatusStream)>,
 }
 
 impl Session {
@@ -325,7 +326,7 @@ impl PuncherService for PuncherServer {
 
 	async fn stream_session(
 		&self,
-		request: Request<Streaming<Ping>>,
+		request: Request<Streaming<ClientStatus>>,
 	) -> Result<Response<Self::StreamSessionStream>, Status> {
 		let mut request = request.into_inner();
 
@@ -341,17 +342,23 @@ impl PuncherService for PuncherServer {
 		let session = self
 			.get(&session_id)
 			.await
-			.ok_or(Status::invalid_argument("Session ID points to no session."))?;
+			.ok_or(Status::invalid_argument("Session ID points to nothing."))?;
 
-		let (tx, rx) = mpsc::channel(32);
+		let (order_tx, order_rx) = mpsc::channel(32);
+
+		let (status_tx, status_rx) = watch::channel(ClientStatusEnum::PunchStatus( PunchStatus { message: None, success: false }));
 		
 		
 		let s = session.clone();
 		tokio::spawn(async move {
-			while let Some(ping_result) = request.next().await {
-				if let Ok(_) = ping_result {
+			while let Some(msg) = request.next().await {
+				if let Ok(status) = msg {
 					let mut session = s.write().await;
 					session.see();
+
+					if let Some(status) = status.status {
+						status_tx.send(status);
+					}
 				} else {
 					break;
 				}
@@ -359,9 +366,9 @@ impl PuncherService for PuncherServer {
 		});
 
 		let mut session = session.write().await;
-		session.stream = Some(tx);
+		session.stream = Some((order_tx, status_rx));
 
-		let stream = Box::pin(ReceiverStream::new(rx)) as Self::StreamSessionStream;
+		let stream = Box::pin(ReceiverStream::new(order_rx)) as Self::StreamSessionStream;
 		Ok(Response::new(stream))
 	}
 
@@ -407,8 +414,7 @@ impl PuncherService for PuncherServer {
 		let id_map = self.id_map.read().await;
 		let target_session_id = id_map
 			.get(&target_listing_id)
-			.ok_or(Status::invalid_argument("Listing ID has no associated session."))?
-			.clone();
+			.ok_or(Status::invalid_argument("Listing ID has no associated session."))?;
 
 		let target_session = self
 			.validate(&target_session_id)
@@ -431,10 +437,10 @@ impl PuncherService for PuncherServer {
 		};
 
 
-		let (resp, target_resp): (Result<()>, Result<()>) = join!(
+		let (resp, target_resp): (Result<PunchStatus>, Result<PunchStatus>) = join!(
 			async move {
-				let session = session.read().await;
-				let stream = session.stream.as_ref().ok_or(anyhow!("No stream found on a validated session."))?;
+				let mut session = session.write().await;
+				let (tx, rx) = session.stream.as_mut().ok_or(anyhow!("No stream found on a validated session."))?;
 
 				let order = Ok(OrderMessage {
 					order: Some(OrderEnum::Punch(Punch {
@@ -443,13 +449,17 @@ impl PuncherService for PuncherServer {
 					})),
 				});
 
-				stream.send(order).await.map_err(|e| format!("Unable to send order: {e}"))?;
-				Ok(())
+				tx.send(order).await.map_err(|e| anyhow!("Unable to send order: {e}"))?;
+				rx.mark_unchanged();
+				rx.changed().await.map_err(|e| anyhow!("Receiving error: {e}"))?;
+				match &*rx.borrow() {
+					ClientStatusEnum::PunchStatus(status) => Ok(status.clone()),
+				}
 			},
 
 			async move {
-				let target_session = target_session.read().await;
-				let stream = target_session.stream.as_ref().ok_or(anyhow!("No stream found on a validated session."))?;
+				let mut target_session = target_session.write().await;
+				let (tx, rx) = target_session.stream.as_mut().ok_or(anyhow!("No stream found on a validated session."))?;
 
 				let order = Ok(OrderMessage {
 					order: Some(OrderEnum::Punch(Punch {
@@ -458,13 +468,39 @@ impl PuncherService for PuncherServer {
 					})),
 				});
 
-				stream.send(order).await.map_err(|e| format!("Unable to send order: {e}"))?;
-				Ok(())
+				tx.send(order).await.map_err(|e| anyhow!("Unable to send order: {e}"))?;
+				rx.mark_unchanged();
+				rx.changed().await.map_err(|e| anyhow!("Receiving error: {e}"))?;
+				match &*rx.borrow() {
+					ClientStatusEnum::PunchStatus(status) => Ok(status.clone()),
+				}
 			},
 		);
 
-		if resp.is_ok() && target_resp.is_ok() {
+		let resp = match resp {
+			Ok(r) => r,
+			Err(e) => {
+				eprintln!("Error while  trying to punch: {e}");
+				PunchStatus{ message: None, success: false}
+			},
+		};
+		let target_resp = match target_resp {
+			Ok(r) => r,
+			Err(e) => {
+				eprintln!("Error while  trying to punch: {e}");
+				PunchStatus{ message: None, success: false}
+			},
+		};
+
+		if resp.success && target_resp.success {
 			return Ok(Response::new(JoinResponse { }));
+		} else {
+			if let Some(msg) = resp.message {
+				eprintln!("Punch failure message(joiner): {msg}")
+			}
+			if let Some(msg) = target_resp.message {
+				eprintln!("Punch failure message(target): {msg}")
+			}
 		}
 
 		// TODO handle Proxy fallback		
