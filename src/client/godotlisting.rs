@@ -4,6 +4,7 @@ use crate::server::listing::{Listing, ListingNoId};
 
 #[derive(GodotClass)]
 #[class(base=RefCounted)]
+#[allow(dead_code)]
 pub struct GdListing {
 	id: String,
 	gd_listing_no_id: GdListingNoId,

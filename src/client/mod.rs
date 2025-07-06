@@ -1,13 +1,13 @@
-use std::{net::{SocketAddr, SocketAddrV4}, sync::Arc, time::Duration};
+use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, sync::Arc, time::Duration};
 use anyhow::Result;
 use futures::StreamExt;
 use godot::prelude::*;
-use tokio::{sync::{mpsc::{self, Sender}, RwLock, RwLockWriteGuard}, task::spawn_local, time::sleep};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::{net::UdpSocket, sync::{mpsc::{self, Sender}, RwLock, RwLockWriteGuard}, task::spawn_local, time::sleep};
+use tokio_stream::{wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
-use tonic::{transport::Channel, Request, Streaming};
+use tonic::{transport::Channel, Request, Status, Streaming};
 use uuid::Uuid;
-use crate::{client::godotlisting::{GdListing, GdListingNoId}, puncher::{puncher_service_client::PuncherServiceClient, AddListingRequest, ClientStatus, CreateSessionRequest, EndSessionRequest, GetListingsRequest, JoinRequest, Order, RemoveListingRequest}, server::listing::{Listing, ListingNoId}};
+use crate::{client::godotlisting::{GdListing, GdListingNoId}, puncher::{order::Order as OrderEnum, puncher_service_client::PuncherServiceClient, AddListingRequest, ClientStatus, CreateSessionRequest, EndSessionRequest, GetListingsRequest, JoinRequest, Order, RemoveListingRequest}, server::listing::{Listing, ListingNoId}};
 
 type ThreadSafe<T> = Arc<RwLock<T>>;
 
@@ -331,26 +331,91 @@ async fn ping(sender: Sender<ClientStatus>, cancel: CancellationToken) {
 	}
 }
 
-async fn follow_orders(client: ThreadSafe<PuncherServiceClient<Channel>>, mut order_stream: Streaming<Order>, status_tx: mpsc::Sender<ClientStatus>, cancel: CancellationToken) {
+async fn handle_orders(client: ThreadSafe<PuncherServiceClient<Channel>>, mut order_stream: Streaming<Order>, status_tx: mpsc::Sender<ClientStatus>, cancel: CancellationToken) {
 	loop {
 		tokio::select! {
 			msg = order_stream.next() => {
-				if let Some(msg) = msg {
-					match msg {
-						Ok(order) => {
-							println!("received order: {order:?}")
-						}
-						Err(e) => {
-							godot_error!("Received error order: {e}")
-						}
-					}
-				} else {
-					break;
-				}
+				receive_order(msg, status_tx, client).await;
 			}
 			_ = cancel.cancelled() => {
 				break;
 			}
 		}
 	}
+}
+
+async fn receive_order(msg: Option<Result<Order, Status>>, status_tx: mpsc::Sender<ClientStatus>, client: ThreadSafe<PuncherServiceClient<Channel>>) {
+	if let Some(msg) = msg {
+		match msg {
+			Ok(order) => {
+				if let Some(order) = order.order {
+					match order {
+						OrderEnum::Punch(pu) => {
+							let ip = match pu.ip.parse::<Ipv4Addr>() {
+								Ok(ip) => ip,
+								Err(e) => {
+									godot_error!("Received bad ip from server: {e}");
+									return;
+								},
+							};
+							let port = match pu.port.try_into() {
+								Ok(port) => port,
+								Err(e) => {
+									godot_error!("Received bad port from server: {e}");
+									return;
+								}
+							};
+							let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
+
+							// send udp packets to addr.
+						},
+						OrderEnum::Proxy(_) => {},
+					}
+				}
+
+			}
+			Err(e) => {
+				godot_error!("Received error order: {e}")
+			}
+		}
+	}
+	//  else {
+	// 	break;
+	// }
+}
+
+pub async fn punch_nat(target_addr: SocketAddr, bind_addr: SocketAddr) -> Result<()> {
+	let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
+	socket.connect(target_addr).await?;
+
+	let packet = b"punch";
+	let mut recv = [0u8; 1];
+
+	let cancel = CancellationToken::new();
+
+	let c = cancel.clone();
+	let s = socket.clone();
+	tokio::spawn(async move {
+		loop {
+			tokio::select! {
+				Err(e) = s.send(packet) => {
+					godot_error!("Unable to send packet {e}");
+				}
+				_ = c.cancelled() => {
+					break;
+				}
+			}
+		}
+	});
+
+	tokio::select! {
+		_ = socket.recv(&mut recv) => {
+			cancel.cancel();
+			return Ok(());
+		}
+		_ = sleep(Duration::from_secs(60)) => {
+			cancel.cancel();
+			anyhow::bail!("Timeout.");
+		}
+	};
 }
