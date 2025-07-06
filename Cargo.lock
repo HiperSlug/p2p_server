@@ -641,6 +641,7 @@ dependencies = [
  "rand",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tonic-build",
  "uuid",

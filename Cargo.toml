@@ -13,6 +13,7 @@ tonic = { version = "0.13.1", features = ["transport"] }
 prost = "0.13.5"
 rand = "0.9.1"
 tokio-stream = "0.1.17"
+tokio-util = "0.7.15"
 
 [[bin]]
 name = "nat_puncher_server"

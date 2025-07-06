@@ -1,22 +1,24 @@
 use std::{net::{SocketAddr, SocketAddrV4}, sync::Arc, time::Duration};
 use anyhow::Result;
+use futures::StreamExt;
 use godot::prelude::*;
-use tokio::{sync::{mpsc::{self, Sender}, oneshot, RwLock}, task::spawn_local, time::sleep};
+use tokio::{sync::{mpsc::{self, Sender}, RwLock, RwLockWriteGuard}, task::spawn_local, time::sleep};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{transport::Channel, Request};
+use tokio_util::sync::CancellationToken;
+use tonic::{transport::Channel, Request, Streaming};
 use uuid::Uuid;
-use crate::{client::gdlisting::GDListing, puncher::{puncher_service_client::PuncherServiceClient, AddListingRequest, ClientStatus, CreateSessionRequest, EndSessionRequest, GetListingsRequest, JoinRequest, RemoveListingRequest}, server::listing::{Listing, ListingNoId}};
+use crate::{client::godotlisting::{GdListing, GdListingNoId}, puncher::{puncher_service_client::PuncherServiceClient, AddListingRequest, ClientStatus, CreateSessionRequest, EndSessionRequest, GetListingsRequest, JoinRequest, Order, RemoveListingRequest}, server::listing::{Listing, ListingNoId}};
 
 type ThreadSafe<T> = Arc<RwLock<T>>;
 
-pub mod gdlisting;
+pub mod godotlisting;
 
 #[derive(GodotClass)]
 #[class(base=RefCounted)]
 struct PunchingClient {
 	base: Base<RefCounted>,
 	client: ThreadSafe<Option<Client>>,
-	listings: ThreadSafe<Vec<GDListing>>
+	listings: ThreadSafe<Option<Array<Gd<GdListing>>>>,
 }
 
 #[godot_api]
@@ -24,7 +26,7 @@ impl IRefCounted for PunchingClient {
 	fn init(base: Base<RefCounted>) -> Self { Self {
 		base,
 		client: Arc::new(RwLock::new(None)),
-		listings: Arc::new(RwLock::new(Vec::new())),
+		listings: Arc::new(RwLock::new(None)),
 	}}
 }
 
@@ -76,11 +78,19 @@ impl PunchingClient {
 
 	
 	#[func]
-	pub fn create_listing(&self/*, listing: GDListing*/) {
+	pub fn create_listing(&self, listing: Gd<GdListingNoId>) {
 		let client = self.client.clone();
 
 		spawn_local(async move {
+			let mut client = client.write().await;
+			let Some(c) = client.as_mut() else {
+				godot_error!("Client not connected when creating listing.");
+				return;
+			};
 
+			if let Err(e) = c.create_listing(ListingNoId::from(listing)).await {
+				godot_error!("Couldnt create listing: {e}.");
+			};
 		});
 	}
 
@@ -104,11 +114,12 @@ impl PunchingClient {
 	#[func]
 	pub fn get_listings(&self) {
 		let client = self.client.clone();
+		let client_listings = self.listings.clone();
 
 		spawn_local(async move {
 			let mut client = client.write().await;
 			let Some(c) = client.as_mut() else {
-				godot_error!("Client not connected when removing listing.");
+				godot_error!("Client not connected when getting listings.");
 				return;
 			};
 
@@ -120,22 +131,48 @@ impl PunchingClient {
 				}
 			};
 
-			// GIVE GODOT THE LISTINGS.
+			let gd_listings: Array<Gd<GdListing>> = listings
+				.into_iter()
+				.map(|l| Gd::from_object(GdListing::from(l)))
+				.collect();
+
+			let mut listings = client_listings.write().await;
+			*listings = Some(gd_listings);
 		});
 	}
 
 	
 	#[func]
-	pub fn join_listing(&self, listing_id: GString) {
+	pub fn join_listing(&self, listing_id: String) {
+		let client = self.client.clone();
+		let listing_id = match listing_id.parse() {
+			Ok(id) => id,
+			Err(e) => {
+				godot_error!("Couldnt join listing: {e}");
+				return
+			}
+		};
 
+		spawn_local(async move {
+			let mut client = client.write().await;
+			let Some(c) = client.as_mut() else {
+				godot_error!("Client not connected when getting listings.");
+				return;
+			};
+
+			if let Err(e) = c.join(listing_id).await {
+				godot_error!("Error while joining listing: {e}");
+				return;
+			};
+		});
 	}
 }
 
 
 pub struct Client {
-	client: PuncherServiceClient<Channel>,
+	client: ThreadSafe<PuncherServiceClient<Channel>>,
 	session_id: Vec<u8>,
-	stop_ping: oneshot::Sender<()>,
+	cancel: CancellationToken,
 }
 
 impl Client {
@@ -143,15 +180,15 @@ impl Client {
 
 	pub fn id(&self) -> &Vec<u8> {&self.session_id}
 
-	pub fn inner_mut(&mut self) -> &mut PuncherServiceClient<Channel> {&mut self.client}
+	pub async fn inner_mut(&self) -> RwLockWriteGuard<'_, PuncherServiceClient<Channel>> {self.client.write().await}
 
 	pub async fn new(
 		addr: SocketAddr, 
 		server_addr: SocketAddr
-	) -> Self {
+	) -> Self { 
 		println!("Creating client");
 
-		let mut client = match Self::create_client(server_addr).await {
+		let client = match Self::create_client(server_addr).await {
 			Ok(c) => c,
 			Err(e) => {
 				godot_error!("Unable to create client: {e}");
@@ -165,7 +202,7 @@ impl Client {
 			port: addr.port().into(),
 		};
 		
-		let session_id = match Self::create_session(&mut client, request).await {
+		let session_id = match Self::create_session(client.clone(), request).await {
 			Ok(id) => id,
 			Err(e) => {
 				godot_error!("Unable to create session: {e}");
@@ -175,7 +212,7 @@ impl Client {
 
 		println!("Session created");
 
-		let stop_ping = match Self::start_session(&mut client, &session_id).await {
+		let cancel = match Self::start_session(client.clone(), &session_id).await {
 			Ok(s) => s,
 			Err(e) => {
 				godot_error!("Unable to start session: {e}");
@@ -188,23 +225,25 @@ impl Client {
 		Self {
 			client,
 			session_id,
-			stop_ping,
+			cancel,
 		}
 	}
 
 	async fn create_client(
 		server_addr: SocketAddr
-	) -> Result<PuncherServiceClient<Channel>> {
+	) -> Result<ThreadSafe<PuncherServiceClient<Channel>>> {
 		let uri = format!("https://{server_addr}").parse()?;
 		let channel = Channel::builder(uri).connect().await?;
 
-		Ok(PuncherServiceClient::new(channel))
+		Ok(Arc::new(RwLock::new(PuncherServiceClient::new(channel))))
 	}
 
 	async fn create_session(
-		client: &mut PuncherServiceClient<Channel>, 
+		client: ThreadSafe<PuncherServiceClient<Channel>>, 
 		request: CreateSessionRequest
 	) -> Result<Vec<u8>> {
+		let mut client = client.write().await;
+
 		let response = client.create_session(Request::new(request)).await?;
 		let response = response.into_inner();
 
@@ -212,51 +251,52 @@ impl Client {
 	}
 
 	async fn start_session(
-		client: &mut PuncherServiceClient<Channel>, 
+		client: ThreadSafe<PuncherServiceClient<Channel>>, 
 		session_id: &Vec<u8>,
-	) -> Result<oneshot::Sender<()>> {
+	) -> Result<CancellationToken> {
 		// start stream //
-		let (ping_tx, ping_rx) = mpsc::channel(8);
-		let request = Request::new(ReceiverStream::new(ping_rx));
+		let (status_tx, status_rx) = mpsc::channel(8);
+		let request = Request::new(ReceiverStream::new(status_rx));
 		
-		ping_tx.send(ClientStatus { session_id: Some(session_id.clone()), status: None }).await?;
+		status_tx.send(ClientStatus { session_id: Some(session_id.clone()), status: None }).await?;
 
-		let response = client.stream_session(request).await?;
-		let mut stream = response.into_inner();
+		let response = {
+			let mut c = client.write().await;
+			c.stream_session(request).await?
+		};
+		let order_stream = response.into_inner();
 
+		let cancel = CancellationToken::new();
+		
 		// pings //
-		let (stop_tx, stop_rx) = oneshot::channel();
-
-		tokio::spawn(ping(ping_tx, stop_rx));
+		tokio::spawn(ping(status_tx.clone(), cancel.clone()));
 	
 		// orders //
-		tokio::spawn(async move {
-			while let Ok(Some(_)) = stream.message().await {}
-		});
+		tokio::spawn(follow_orders(client, order_stream, status_tx, cancel.clone()));
 
-		Ok(stop_tx)
+		Ok(cancel)
 	}
 
-	pub async fn end(mut self) {
+	pub async fn end(self) {
 		let session_id = self.session_id.clone();
-		let _ = self.inner_mut().end_session(Request::new(EndSessionRequest {session_id})).await;
-		let _ = self.stop_ping.send(());
+		let _ = self.inner_mut().await.end_session(Request::new(EndSessionRequest {session_id})).await;
+		self.cancel.cancel();
 	}
 
 	pub async fn create_listing(&mut self, listing: ListingNoId) -> Result<()> {
 		let session_id = self.session_id.clone();
-		self.inner_mut().add_listing(Request::new( AddListingRequest { listing: Some(listing.into()), session_id } )).await?;
+		self.inner_mut().await.add_listing(Request::new( AddListingRequest { listing: Some(listing.into()), session_id } )).await?;
 		Ok(())
 	}
 
 	pub async fn remove_listing(&mut self) -> Result<()> {
 		let session_id = self.session_id.clone();
-		self.inner_mut().remove_listing(Request::new(RemoveListingRequest { session_id })).await?;
+		self.inner_mut().await.remove_listing(Request::new(RemoveListingRequest { session_id })).await?;
 		Ok(())
 	}
 
 	pub async fn get_listings(&mut self) -> Result<Vec<Listing>> {
-		let resp = self.inner_mut().get_listings(Request::new( GetListingsRequest {})).await?;
+		let resp = self.inner_mut().await.get_listings(Request::new( GetListingsRequest {})).await?;
 		let resp = resp.into_inner();
 		Ok(resp
 			.listings
@@ -271,20 +311,45 @@ impl Client {
 			target_listing_id: listing_id.as_bytes().to_vec(),
 		});
 
-		self.inner_mut().join(req).await?;
+		self.inner_mut().await.join(req).await?;
 		
 		Ok(())
 	}
 }
 
 
-async fn ping(sender: Sender<ClientStatus>, mut stopper: oneshot::Receiver<()>) {
+async fn ping(sender: Sender<ClientStatus>, cancel: CancellationToken) {
 	loop {
 		tokio::select! {
 			_ = sleep(Duration::from_secs(60)) => {
 				let _ = sender.send(ClientStatus { session_id: None, status: None }).await;
 			}
-			_ = &mut stopper => {
+			_ = cancel.cancelled() => {
+				break;
+			}
+		}
+	}
+}
+
+async fn follow_orders(client: ThreadSafe<PuncherServiceClient<Channel>>, mut order_stream: Streaming<Order>, status_tx: mpsc::Sender<ClientStatus>, cancel: CancellationToken) {
+	loop {
+		tokio::select! {
+			msg = order_stream.next() => {
+				if let Some(msg) = msg {
+					match msg {
+						Ok(order) => {
+							println!("received order: {order:?}")
+						}
+						Err(e) => {
+							godot_error!("Received error order: {e}")
+						}
+					}
+				} else {
+					break;
+				}
+			}
+			_ = cancel.cancelled() => {
+				break;
 			}
 		}
 	}

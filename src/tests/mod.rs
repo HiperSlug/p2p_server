@@ -72,14 +72,14 @@ fn test_session_timeout() {
 	let name = "test listing";
 	println!("Adding listing: {name}");
 
-	let res = client.inner_mut().add_listing(AddListingRequest {
+	let res = client.inner_mut().await.add_listing(AddListingRequest {
 		session_id,
 		listing: Some(ListingNoId { name: name.to_string() }),
 	}).await.unwrap();
 
 	println!("Listing added with ID: {:?}", res.get_ref().listing_id);
 
-	let listings = match client.inner_mut().get_listings(GetListingsRequest {}).await {
+	let listings = match client.inner_mut().await.get_listings(GetListingsRequest {}).await {
 		Ok(l) => l,
 		Err(e) => panic!("Err({e})"),
 	};
@@ -100,17 +100,17 @@ fn test_session_timeout() {
 	let session_id = client.id().clone();
 
 	println!("Adding test listing");
-	client.inner_mut().add_listing(AddListingRequest {
+	client.inner_mut().await.add_listing(AddListingRequest {
 		session_id: session_id.clone(),
 		listing: Some(ListingNoId { name: "test".to_string() }),
 	}).await.unwrap();
 
 	println!("Removing listing");
-	client.inner_mut().remove_listing(RemoveListingRequest {
+	client.inner_mut().await.remove_listing(RemoveListingRequest {
 		session_id: session_id.clone(),
 	}).await.unwrap();
 
-	let listings = client.inner_mut().get_listings(GetListingsRequest {}).await.unwrap();
+	let listings = client.inner_mut().await.get_listings(GetListingsRequest {}).await.unwrap();
 	println!("Remaining listings: {:?}", listings.get_ref().listings);
 
 	assert!(listings.get_ref().listings.is_empty());
