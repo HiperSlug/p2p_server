@@ -7,7 +7,7 @@ use tokio_stream::{wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tonic::{transport::Channel, Request, Status, Streaming};
 use uuid::Uuid;
-use crate::{client::godotlisting::{GdListing, GdListingNoId}, puncher::{order::Order as OrderEnum, puncher_service_client::PuncherServiceClient, AddListingRequest, ClientStatus, CreateSessionRequest, EndSessionRequest, GetListingsRequest, JoinRequest, Order, RemoveListingRequest}, server::listing::{Listing, ListingNoId}};
+use crate::{client::godotlisting::{GdListing, GdListingNoId}, puncher::{client_status::Status as CStatus, order::Order as OrderEnum, puncher_service_client::PuncherServiceClient, AddListingRequest, ClientStatus, CreateSessionRequest, EndSessionRequest, GetListingsRequest, JoinRequest, Order, PunchStatus, RemoveListingRequest}, server::listing::{Listing, ListingNoId}};
 
 type ThreadSafe<T> = Arc<RwLock<T>>;
 
@@ -212,7 +212,7 @@ impl Client {
 
 		println!("Session created");
 
-		let cancel = match Self::start_session(client.clone(), &session_id).await {
+		let cancel = match Self::start_session(client.clone(), &session_id, addr).await {
 			Ok(s) => s,
 			Err(e) => {
 				godot_error!("Unable to start session: {e}");
@@ -253,6 +253,7 @@ impl Client {
 	async fn start_session(
 		client: ThreadSafe<PuncherServiceClient<Channel>>, 
 		session_id: &Vec<u8>,
+		addr: SocketAddr,
 	) -> Result<CancellationToken> {
 		// start stream //
 		let (status_tx, status_rx) = mpsc::channel(8);
@@ -272,7 +273,7 @@ impl Client {
 		tokio::spawn(ping(status_tx.clone(), cancel.clone()));
 	
 		// orders //
-		tokio::spawn(follow_orders(client, order_stream, status_tx, cancel.clone()));
+		tokio::spawn(handle_orders(order_stream, status_tx, cancel.clone(), addr, session_id.clone()));
 
 		Ok(cancel)
 	}
@@ -315,6 +316,8 @@ impl Client {
 		
 		Ok(())
 	}
+
+	
 }
 
 
@@ -329,59 +332,6 @@ async fn ping(sender: Sender<ClientStatus>, cancel: CancellationToken) {
 			}
 		}
 	}
-}
-
-async fn handle_orders(client: ThreadSafe<PuncherServiceClient<Channel>>, mut order_stream: Streaming<Order>, status_tx: mpsc::Sender<ClientStatus>, cancel: CancellationToken) {
-	loop {
-		tokio::select! {
-			msg = order_stream.next() => {
-				receive_order(msg, status_tx, client).await;
-			}
-			_ = cancel.cancelled() => {
-				break;
-			}
-		}
-	}
-}
-
-async fn receive_order(msg: Option<Result<Order, Status>>, status_tx: mpsc::Sender<ClientStatus>, client: ThreadSafe<PuncherServiceClient<Channel>>) {
-	if let Some(msg) = msg {
-		match msg {
-			Ok(order) => {
-				if let Some(order) = order.order {
-					match order {
-						OrderEnum::Punch(pu) => {
-							let ip = match pu.ip.parse::<Ipv4Addr>() {
-								Ok(ip) => ip,
-								Err(e) => {
-									godot_error!("Received bad ip from server: {e}");
-									return;
-								},
-							};
-							let port = match pu.port.try_into() {
-								Ok(port) => port,
-								Err(e) => {
-									godot_error!("Received bad port from server: {e}");
-									return;
-								}
-							};
-							let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
-
-							// send udp packets to addr.
-						},
-						OrderEnum::Proxy(_) => {},
-					}
-				}
-
-			}
-			Err(e) => {
-				godot_error!("Received error order: {e}")
-			}
-		}
-	}
-	//  else {
-	// 	break;
-	// }
 }
 
 pub async fn punch_nat(target_addr: SocketAddr, bind_addr: SocketAddr) -> Result<()> {
@@ -418,4 +368,77 @@ pub async fn punch_nat(target_addr: SocketAddr, bind_addr: SocketAddr) -> Result
 			anyhow::bail!("Timeout.");
 		}
 	};
+}
+
+async fn handle_orders(mut order_stream: Streaming<Order>, status_tx: mpsc::Sender<ClientStatus>, cancel: CancellationToken, addr: SocketAddr, session_id: Vec<u8>) {
+	loop {
+		tokio::select! {
+			msg = order_stream.next() => {
+				receive_order(msg, &status_tx, addr, &session_id).await;
+			}
+			_ = cancel.cancelled() => {
+				break;
+			}
+		}
+	}
+}
+
+
+async fn receive_order(msg: Option<Result<Order, Status>>, status_tx: &mpsc::Sender<ClientStatus>, addr: SocketAddr, session_id: &Vec<u8>) {
+	if let Some(msg) = msg {
+		match msg {
+			Ok(order) => {
+				if let Some(order) = order.order {
+					match order {
+						OrderEnum::Punch(pu) => {
+							let ip = match pu.ip.parse::<Ipv4Addr>() {
+								Ok(ip) => ip,
+								Err(e) => {
+									godot_error!("Received bad ip from server: {e}");
+									return;
+								},
+							};
+							let port = match pu.port.try_into() {
+								Ok(port) => port,
+								Err(e) => {
+									godot_error!("Received bad port from server: {e}");
+									return;
+								}
+							};
+							let target_addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
+
+							match punch_nat(target_addr, addr).await {
+								Err(punch_err) => {
+									if let Err(e) =  status_tx.send(ClientStatus { 
+										session_id: Some(session_id.clone()), 
+										status: Some(CStatus::PunchStatus(PunchStatus {
+											message: Some(format!("Error punching: {punch_err}")),
+											success: false,
+										})),
+									}).await {
+										godot_error!("Unable to send PunchingFailure: {e}");
+									};
+								}
+								Ok(_) => {
+									if let Err(e) =  status_tx.send(ClientStatus { 
+										session_id: Some(session_id.clone()), 
+										status: Some(CStatus::PunchStatus(PunchStatus {
+											message: None,
+											success: true,
+										})),
+									}).await {
+										godot_error!("Unable to send PunchingFailure: {e}");
+									};
+								}
+							};
+						},
+						OrderEnum::Proxy(_) => {}
+					}
+				}
+			}
+			Err(e) => {
+				godot_error!("Received error order: {e}")
+			}
+		}
+	}
 }

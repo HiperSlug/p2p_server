@@ -66,7 +66,7 @@ fn test_session_timeout() {
 #[tokio::test]
 /* AI */ async fn test_add_and_get_listing() {
 	println!("Starting test_add_and_get_listing");
-	let (mut client, end) = setup().await;
+	let (client, end) = setup().await;
 	let session_id = client.id().clone();
 
 	let name = "test listing";
@@ -96,7 +96,7 @@ fn test_session_timeout() {
 #[tokio::test]
 /* AI */ async fn test_remove_listing() {
 	println!("Starting test_remove_listing");
-	let (mut client, end) = setup().await;
+	let (client, end) = setup().await;
 	let session_id = client.id().clone();
 
 	println!("Adding test listing");
