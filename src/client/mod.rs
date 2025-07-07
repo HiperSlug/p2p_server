@@ -2,7 +2,7 @@ use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, sync::Arc, time::Duration};
 use anyhow::{bail, Result};
 use futures::StreamExt;
 use godot::prelude::*;
-use tokio::{net::UdpSocket, sync::{mpsc::{self, Sender}, RwLock, RwLockWriteGuard}, task::spawn_local, time::sleep};
+use tokio::{net::UdpSocket, sync::{mpsc::{self, Sender}, RwLock, RwLockWriteGuard}, task::spawn_local, time::{sleep, timeout}};
 use tokio_stream::{wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tonic::{transport::Channel, Request, Streaming};
@@ -244,7 +244,10 @@ impl Client {
 	) -> Result<Vec<u8>> {
 		let mut client = client.write().await;
 
-		let response = client.create_session(Request::new(request)).await?;
+		let response = timeout(
+			Duration::from_secs(5),
+			client.create_session(Request::new(request)),// this keeps getting timed out.
+		).await??;
 		let response = response.into_inner();
 
 		Ok(response.session_id)
@@ -263,8 +266,12 @@ impl Client {
 
 		let response = {
 			let mut c = client.write().await;
-			c.stream_session(request).await?
+			timeout(
+				Duration::from_secs(5), 
+				c.stream_session(request),
+			).await??
 		};
+
 		let order_stream = response.into_inner();
 
 		let cancel = CancellationToken::new();
@@ -280,24 +287,37 @@ impl Client {
 
 	pub async fn end(self) {
 		let session_id = self.session_id.clone();
-		let _ = self.inner_mut().await.end_session(Request::new(EndSessionRequest {session_id})).await;
+		let _ = timeout(
+			Duration::from_secs(5),
+			self.inner_mut().await.end_session(Request::new(EndSessionRequest {session_id})),
+		).await;
 		self.cancel.cancel();
 	}
 
 	pub async fn create_listing(&mut self, listing: ListingNoId) -> Result<()> {
 		let session_id = self.session_id.clone();
-		self.inner_mut().await.add_listing(Request::new( AddListingRequest { listing: Some(listing.into()), session_id } )).await?;
+		let _ = timeout(
+			Duration::from_secs(5),
+			self.inner_mut().await.add_listing(Request::new( AddListingRequest { listing: Some(listing.into()), session_id } )),
+		).await??;
 		Ok(())
 	}
 
 	pub async fn remove_listing(&mut self) -> Result<()> {
 		let session_id = self.session_id.clone();
-		self.inner_mut().await.remove_listing(Request::new(RemoveListingRequest { session_id })).await?;
+		let _ = timeout(
+			Duration::from_secs(5), 
+			self.inner_mut().await.remove_listing(Request::new(RemoveListingRequest { session_id })),
+		).await??;
+		
 		Ok(())
 	}
 
 	pub async fn get_listings(&mut self) -> Result<Vec<Listing>> {
-		let resp = self.inner_mut().await.get_listings(Request::new( GetListingsRequest {})).await?;
+		let resp = timeout(
+			Duration::from_secs(20),
+			self.inner_mut().await.get_listings(Request::new( GetListingsRequest {})),
+		).await??;
 		let resp = resp.into_inner();
 		Ok(resp
 			.listings
@@ -312,7 +332,10 @@ impl Client {
 			target_listing_id: listing_id.as_bytes().to_vec(),
 		});
 
-		self.inner_mut().await.join(req).await?;
+		let _ = timeout(
+			Duration::from_secs(5), 
+			self.inner_mut().await.join(req),
+		).await??;
 		
 		Ok(())
 	}
@@ -339,7 +362,7 @@ pub async fn punch_nat(target_addr: SocketAddr, bind_addr: SocketAddr) -> Result
 	socket.connect(target_addr).await?;
 
 	let packet = b"punch";
-	let mut recv = [0u8; 1];
+	let mut recv = [0u8; 5];
 
 	let cancel = CancellationToken::new();
 
@@ -347,33 +370,34 @@ pub async fn punch_nat(target_addr: SocketAddr, bind_addr: SocketAddr) -> Result
 	let s = socket.clone();
 	tokio::spawn(async move {
 		loop {
-			tokio::select! {
-				Err(e) = s.send(packet) => {
-					godot_error!("Unable to send packet {e}");
-				}
-				_ = c.cancelled() => {
-					break;
-				}
+			if c.is_cancelled() {
+				break;
 			}
+
+			if let Err(e) = s.send(packet).await {
+				godot_error!("Unable to send packet {e}");
+				panic!("Unable to send packet {e}");
+			}
+			
+			sleep(Duration::from_millis(300)).await;
 		}
 	});
 
-	tokio::select! {
-		_ = socket.recv(&mut recv) => {
-			cancel.cancel();
-			return Ok(());
-		}
-		_ = sleep(Duration::from_secs(60)) => {
-			cancel.cancel();
-			anyhow::bail!("Timeout.");
-		}
-	};
+	let _ = timeout(
+		Duration::from_secs(3), 
+		socket.recv_from(&mut recv),
+	).await??; 
+	cancel.cancel();
+
+	Ok(())
 }
+
 
 async fn handle_orders(mut order_stream: Streaming<Order>, status_tx: mpsc::Sender<ClientStatus>, cancel: CancellationToken, addr: SocketAddr, session_id: Vec<u8>) {
 	loop {
 		tokio::select! {
 			msg = order_stream.next() => {
+				println!("/c received order_msg: {msg:?}");
 				if let Some(msg) = msg {
 					match msg {
 						Ok(msg) => {
@@ -401,14 +425,17 @@ async fn handle_orders(mut order_stream: Streaming<Order>, status_tx: mpsc::Send
 
 
 async fn receive_order(order: OrderEnum, status_tx: &mpsc::Sender<ClientStatus>, addr: SocketAddr, session_id: &Vec<u8>) -> Result<()> {
+	println!("/c handling order");
 	match order {
 		OrderEnum::Punch(pu) => {
 			let ip = pu.ip.parse::<Ipv4Addr>()?;
 			let port = pu.port.try_into()?;
 			let target_addr: SocketAddr = SocketAddr::V4(SocketAddrV4::new(ip, port));
 
+			println!("/c pre-punch");
 			match punch_nat(target_addr, addr).await {
 				Ok(_) => {
+					println!("/c punch success");
 					status_tx.send(ClientStatus { 
 						session_id: Some(session_id.clone()), 
 						status: Some(CStatus::PunchStatus(PunchStatus {
@@ -419,6 +446,7 @@ async fn receive_order(order: OrderEnum, status_tx: &mpsc::Sender<ClientStatus>,
 				}
 
 				Err(punch_err) => {
+					println!("/c punch failure");
 					status_tx.send(ClientStatus { 
 						session_id: Some(session_id.clone()), 
 						status: Some(CStatus::PunchStatus(PunchStatus {
@@ -428,6 +456,7 @@ async fn receive_order(order: OrderEnum, status_tx: &mpsc::Sender<ClientStatus>,
 					}).await?;
 				}
 			};
+			println!("/c punched");
 
 			Ok(())
 		},

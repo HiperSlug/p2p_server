@@ -1,120 +1,108 @@
-use crate::{client::Client, puncher::puncher_service_server::PuncherServiceServer, server::{session::Session, PuncherServer}};
-use anyhow::Result;
-use tokio::{net::TcpListener, sync::oneshot::Sender};
-use tonic::transport::Server;
-use std::{net::{SocketAddr, SocketAddrV4}, str::FromStr, time::{Duration, Instant}};
-use crate::puncher::{AddListingRequest, GetListingsRequest, RemoveListingRequest, ListingNoId};
+use crate::{client::{punch_nat, Client}, server::{self, listing::ListingNoId, session::Session}};
+use tokio::{net::UdpSocket, sync::oneshot};
+use std::{net::SocketAddr, str::FromStr, time::{Duration, Instant}};
 
 // -- SESSION -- //
-
 #[test]
 fn test_session_timeout() {
 	let addr = SocketAddr::from_str("127.0.0.1:8080").unwrap();
 	
 	let timeout_time =  Instant::now() - Session::TIMEOUT_TIME;
 
-	println!("Now: {:?}", Instant::now());
-
 	let mut s = Session::new(addr);
 	let t = timeout_time + Duration::from_secs(5);
-	println!("Under: {t:?}");
 	s.set_last_seen(t);
 	assert!(!s.is_timed_out());
 	
 	let mut s = Session::new(addr);
 	let t = timeout_time - Duration::from_secs(5);
-	println!("Over: {t:?}");
 	s.set_last_seen(t); 
 	assert!(s.is_timed_out());
 }
 
-// -- SERVER -- //
+// -- OTHER STUFF -- //
 
-/* AI */ async fn setup() -> (Client, Sender<Result<()>> ) {
-	println!("Setting up server and client");
-	let server_ip = "127.0.0.1".parse().unwrap();
-	let server_port = 0;
-	let server_addr = SocketAddr::V4(SocketAddrV4::new(server_ip, server_port));
+async fn test_server() -> SocketAddr {
+	let addr = ephemeral_addr().await;
 
-	let listener = TcpListener::bind(server_addr).await.unwrap();
-	let local_addr = listener.local_addr().unwrap();
-	println!("Server bound to {local_addr}");
+	let (ready_tx, ready_rx) = oneshot::channel();
+	tokio::spawn(server::run_signal(addr, ready_tx));
+	ready_rx.await.unwrap();
 
-	let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<Result<()>>();
+	addr
+}
 
-	tokio::spawn(async move {
-		println!("Starting server...");
-		Server::builder()
-			.add_service(PuncherServiceServer::new(PuncherServer::default()))
-			.serve_with_incoming_shutdown(
-				tokio_stream::wrappers::TcpListenerStream::new(listener),
-				async {
-					shutdown_rx.await.ok();
-					println!("Server shutting down");
-				}
-			)
-			.await
-			.unwrap();
-	});
+async fn test_client(server_addr: SocketAddr) -> Client {
+	Client::new(ephemeral_addr().await, server_addr).await
+}
 
-	let client = Client::new(local_addr, local_addr).await;
-	println!("Client created");
+async fn ephemeral_addr() -> SocketAddr {
+	let temp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+	temp.local_addr().unwrap()
+}
 
-	(client, shutdown_tx)
+
+// -- ACTUALLY RELEVANT STUFF -- //
+#[tokio::test]
+/* AI */ async fn listings() { // inconsistent
+	let s_addr = test_server().await;
+	let mut c_1 = test_client(s_addr).await;
+	let mut c_2 = test_client(s_addr).await;
+
+	let listing = ListingNoId { name: "test listing".to_string() };
+	let l = listing.clone();
+	c_1.create_listing(listing).await.expect("Failed to create listing.");
+
+	let listings = c_2.get_listings().await.expect("Failed to get listing."); // inconsistent
+	assert_eq!(listings.len(), 1);
+
+	let target_listing = &listings[0];
+	assert_eq!(*target_listing.inner(), l);
+
+	let listing = ListingNoId { name: "test listing".to_string() };
+	c_2.create_listing(listing).await.expect("Failed to create listing.");
+
+	let listings = c_2.get_listings().await.expect("Failed to get listings.");
+	assert_eq!(listings.len(), 2);
+
+	c_2.remove_listing().await.expect("Failed to remove listing."); 
+	c_1.remove_listing().await.expect("Failed to remove listing.");
+
+	let listings = c_1.get_listings().await.expect("Failed to get listings.");
+	assert_eq!(listings.len(), 0);
 }
 
 #[tokio::test]
-/* AI */ async fn test_add_and_get_listing() {
-	println!("Starting test_add_and_get_listing");
-	let (client, end) = setup().await;
-	let session_id = client.id().clone();
+/* AI */ async fn punching() {
+	let bind_a = ephemeral_addr().await;
+	let bind_b = ephemeral_addr().await;
+	
+	let (a, b) = tokio::join!(
+		async move {
+			punch_nat(bind_a, bind_b).await
+		},
+		async move {
+			punch_nat(bind_b, bind_a).await
+		},
+	);
 
-	let name = "test listing";
-	println!("Adding listing: {name}");
-
-	let res = client.inner_mut().await.add_listing(AddListingRequest {
-		session_id,
-		listing: Some(ListingNoId { name: name.to_string() }),
-	}).await.unwrap();
-
-	println!("Listing added with ID: {:?}", res.get_ref().listing_id);
-
-	let listings = match client.inner_mut().await.get_listings(GetListingsRequest {}).await {
-		Ok(l) => l,
-		Err(e) => panic!("Err({e})"),
-	};
-	println!("Got listings: {:?}", listings.get_ref().listings);
-
-	assert_eq!(listings.get_ref().listings.len(), 1);
-	assert_eq!(listings.get_ref().listings[0].listing_no_id.as_ref().unwrap().name, name);
-
-	end.send(Ok(())).unwrap();
-
-	println!("test_add_and_get_listing finished successfully");
+	assert!(a.is_ok() && b.is_ok(), "a: {a:?}, \nb: {b:?},");
 }
 
+
 #[tokio::test]
-/* AI */ async fn test_remove_listing() {
-	println!("Starting test_remove_listing");
-	let (client, end) = setup().await;
-	let session_id = client.id().clone();
+async fn client_punching() { // inconsistent
+	let s_addr = test_server().await;
+	let mut c_1 = test_client(s_addr).await;
+	let mut c_2 = test_client(s_addr).await;
 
-	println!("Adding test listing");
-	client.inner_mut().await.add_listing(AddListingRequest {
-		session_id: session_id.clone(),
-		listing: Some(ListingNoId { name: "test".to_string() }),
-	}).await.unwrap();
+	let listing = ListingNoId { name: "test listing".to_string() };
+	c_1.create_listing(listing).await.expect("Failed to create listing.");
 
-	println!("Removing listing");
-	client.inner_mut().await.remove_listing(RemoveListingRequest {
-		session_id: session_id.clone(),
-	}).await.unwrap();
+	let listings = c_2.get_listings().await.expect("Failed to get listings.");
+	assert_eq!(listings.len(), 1);
 
-	let listings = client.inner_mut().await.get_listings(GetListingsRequest {}).await.unwrap();
-	println!("Remaining listings: {:?}", listings.get_ref().listings);
+	let target_listing = &listings[0];
 
-	assert!(listings.get_ref().listings.is_empty());
-	println!("test_remove_listing finished successfully");
-
-	end.send(Ok(())).unwrap();
+	c_2.join(*target_listing.id()).await.expect("Failed to join listing.");
 }

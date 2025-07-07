@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use uuid::Uuid;
 use crate::puncher::{Listing as ListingPacket, ListingNoId as ListingNoIdPacket};
 
+#[derive(Debug, PartialEq)]
 pub struct Listing {
 	listing_no_id: ListingNoId,
 	id: Uuid,
@@ -45,7 +46,7 @@ impl From<&Listing> for ListingPacket {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ListingNoId {
 	pub name: String, 
 }
