@@ -1,24 +1,23 @@
-use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, sync::Arc, time::Duration};
-use anyhow::{bail, Result};
-use futures::StreamExt;
+use std::{net::{SocketAddr, SocketAddrV4}, sync::Arc};
 use godot::prelude::*;
-use tokio::{net::UdpSocket, sync::{mpsc::{self, Sender}, RwLock, RwLockWriteGuard}, task::spawn_local, time::{sleep, timeout}};
-use tokio_stream::{wrappers::ReceiverStream};
-use tokio_util::sync::CancellationToken;
-use tonic::{transport::Channel, Request, Streaming};
-use uuid::Uuid;
-use crate::{client::godotlisting::{GdListing, GdListingNoId}, puncher::{client_status::Status as CStatus, order::Order as OrderEnum, puncher_service_client::PuncherServiceClient, AddListingRequest, ClientStatus, CreateSessionRequest, EndSessionRequest, GetListingsRequest, JoinRequest, Order, PunchStatus, RemoveListingRequest}, server::listing::{Listing, ListingNoId}};
+use tokio::{sync::RwLock, task::spawn_local};
+use crate::{client::{asyncflag::AsyncFlag, client::Client, godotlisting::{GdListing, GdListingNoId}}, server::listing::ListingNoId};
 
 type ThreadSafe<T> = Arc<RwLock<T>>;
 
-pub mod godotlisting;
+mod godotlisting;
+mod asyncflag;
+pub mod client;
 
 #[derive(GodotClass)]
 #[class(base=RefCounted)]
 struct PunchingClient {
 	base: Base<RefCounted>,
 	client: ThreadSafe<Option<Client>>,
-	listings: ThreadSafe<Option<Array<Gd<GdListing>>>>,
+	connected: AsyncFlag<bool>,
+	listings: AsyncFlag<Option<Array<Gd<GdListing>>>>,
+	owned_listing: AsyncFlag<Option<String>>,
+	joined_addr: AsyncFlag<Option<(String, u16)>>, // TODO
 }
 
 #[godot_api]
@@ -26,18 +25,55 @@ impl IRefCounted for PunchingClient {
 	fn init(base: Base<RefCounted>) -> Self { Self {
 		base,
 		client: Arc::new(RwLock::new(None)),
-		listings: Arc::new(RwLock::new(None)),
+		
+		connected: AsyncFlag::new_bool("connection_changed", false),
+		listings: AsyncFlag::new_opt("listings_changed"),
+		owned_listing: AsyncFlag::new_opt("owned_listing_changed"),
+		joined_addr: AsyncFlag::new_opt("joined_addr_changed"),
 	}}
 }
 
 #[godot_api]
 impl PunchingClient {
 	#[func]
+	pub fn _physics_process(&mut self, _: f64) {
+		let mut base = self.base().clone();
+
+		if let Some((sig, val)) = self.connected.poll() {
+			base.emit_signal(sig, &[val.to_variant()]);
+		};
+		if let Some((sig, val)) = self.listings.poll() {
+			let val = val.map_or(Variant::nil(), |v| v.to_variant());
+			base.emit_signal(sig, &[val]);
+		};
+		if let Some((sig, val)) = self.owned_listing.poll() {
+			let val = val.map_or(Variant::nil(), |v| v.to_variant());
+			base.emit_signal(sig, &[val]);
+		};
+		if let Some((sig, val)) = self.joined_addr.poll() {
+			let val = val.map_or(Variant::nil(), |v| {
+				VariantArray::from_iter([v.0.to_variant(), v.1.to_variant()]).to_variant()
+			});
+			base.emit_signal(sig, &[val]);
+		};
+	}
+	
+	#[signal]
+	pub fn connection_changed(new_connection: Variant);
+	#[signal]
+	pub fn listings_changed(new_listings: Variant);
+	#[signal]
+	pub fn owned_listing_changed(new_owned_listing: Variant);
+	#[signal]
+	pub fn joined_addr_changed(new_joined_addr: Variant);
+
+	#[func]
 	pub fn connect(&self, server_ip: String, server_port: u16, ip: String, port: u16) {
+		// parse addrs //
 		let server_ip = match server_ip.parse() {
 			Ok(ip) => ip,
 			Err(e) => {
-				godot_error!("PuncherClient: Could not parse server_ip: {e}.");
+				godot_error!("Could not parse server_ip: {e}.");
 				return;
 			}
 		};
@@ -46,24 +82,30 @@ impl PunchingClient {
 		let ip = match ip.parse() {
 			Ok(ip) => ip,
 			Err(e) => {
-				godot_error!("PuncherClient: Could not parse ip: {e}");
+				godot_error!("Could not parse ip: {e}");
 				return;
 			}
 		};
 		let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
 		
+		// spawn task //
 		let client = self.client.clone();
+		let connected_flag = self.connected.inner().clone();
 
 		spawn_local(async move {
 			let new_client = Client::new(addr, server_addr).await;
 			let mut client = client.write().await;
 			*client = Some(new_client);
+			
+			let mut flag = connected_flag.write().await;
+			*flag = true;
 		});
 	}
 	
 	#[func]
 	pub fn disconnect(&self) {
 		let client = self.client.clone();
+		let connected_flag = self.connected.inner().clone();
 		
 		spawn_local( async move {
 			let mut client = client.write().await;
@@ -73,13 +115,16 @@ impl PunchingClient {
 			} else {
 				godot_error!("Disconnected a non-connected Client.");
 			}
+
+			let mut flag = connected_flag.write().await;
+			*flag = false
 		});
 	}
-
 	
 	#[func]
 	pub fn create_listing(&self, listing: Gd<GdListingNoId>) {
 		let client = self.client.clone();
+		// let owned_listing_flag = self.owned_listing.inner().clone();
 
 		spawn_local(async move {
 			let mut client = client.write().await;
@@ -88,15 +133,23 @@ impl PunchingClient {
 				return;
 			};
 
-			if let Err(e) = c.create_listing(ListingNoId::from(listing)).await {
-				godot_error!("Couldnt create listing: {e}.");
+			let _ = match c.create_listing(ListingNoId::from(listing)).await {
+				Ok(l) => l,
+				Err(e) => {
+					godot_error!("Couldnt create listing: {e}.");
+					return;
+				}
 			};
+
+			// let flag = owned_listing_flag.write().await;
+			// *flag = listing_id // TODO TURN THIS INTO A UUID THEN STRING
 		});
 	}
 
 	#[func]
 	pub fn remove_listing(&self) {
 		let client = self.client.clone();
+		let owned_listing_flag = self.owned_listing.inner().clone();
 
 		spawn_local(async move {
 			let mut client = client.write().await;
@@ -107,14 +160,18 @@ impl PunchingClient {
 
 			if let Err(e) = c.remove_listing().await {
 				godot_error!("Couldnt remove listing: {e}");
+				return;
 			};
+
+			let mut flag = owned_listing_flag.write().await;
+			*flag = None
 		});
 	}
 	
 	#[func]
 	pub fn get_listings(&self) {
 		let client = self.client.clone();
-		let client_listings = self.listings.clone();
+		let client_listings = self.listings.inner().clone();
 
 		spawn_local(async move {
 			let mut client = client.write().await;
@@ -144,7 +201,6 @@ impl PunchingClient {
 	
 	#[func]
 	pub fn join_listing(&self, listing_id: String) {
-		let client = self.client.clone();
 		let listing_id = match listing_id.parse() {
 			Ok(id) => id,
 			Err(e) => {
@@ -152,6 +208,8 @@ impl PunchingClient {
 				return
 			}
 		};
+
+		let client = self.client.clone();
 
 		spawn_local(async move {
 			let mut client = client.write().await;
@@ -167,302 +225,3 @@ impl PunchingClient {
 		});
 	}
 }
-
-
-pub struct Client {
-	client: ThreadSafe<PuncherServiceClient<Channel>>,
-	session_id: Vec<u8>,
-	cancel: CancellationToken,
-}
-
-impl Client {
-	pub fn uuid(&self) -> Uuid {Uuid::from_slice(&self.session_id[0..16]).expect("Invalid UUID bytes")}
-
-	pub fn id(&self) -> &Vec<u8> {&self.session_id}
-
-	pub async fn inner_mut(&self) -> RwLockWriteGuard<'_, PuncherServiceClient<Channel>> {self.client.write().await}
-
-	pub async fn new(
-		addr: SocketAddr, 
-		server_addr: SocketAddr
-	) -> Self { 
-		println!("Creating client");
-
-		let client = match Self::create_client(server_addr).await {
-			Ok(c) => c,
-			Err(e) => {
-				godot_error!("Unable to create client: {e}");
-				panic!("Unable to create client: {e}");
-			}
-		};
-		println!("Client connected");
-
-		let request = CreateSessionRequest { 
-			ip: addr.ip().to_string(), 
-			port: addr.port().into(),
-		};
-		
-		let session_id = match Self::create_session(client.clone(), request).await {
-			Ok(id) => id,
-			Err(e) => {
-				godot_error!("Unable to create session: {e}");
-				panic!("Unable to create session: {e}");
-			}
-		};
-
-		println!("Session created");
-
-		let cancel = match Self::start_session(client.clone(), &session_id, addr).await {
-			Ok(s) => s,
-			Err(e) => {
-				godot_error!("Unable to start session: {e}");
-				panic!("Unable to start session: {e}");
-			}
-		};
-
-		println!("Session started");
-
-		Self {
-			client,
-			session_id,
-			cancel,
-		}
-	}
-
-	async fn create_client(
-		server_addr: SocketAddr
-	) -> Result<ThreadSafe<PuncherServiceClient<Channel>>> {
-		let uri = format!("https://{server_addr}").parse()?;
-		let channel = Channel::builder(uri).connect().await?;
-
-		Ok(Arc::new(RwLock::new(PuncherServiceClient::new(channel))))
-	}
-
-	async fn create_session(
-		client: ThreadSafe<PuncherServiceClient<Channel>>, 
-		request: CreateSessionRequest
-	) -> Result<Vec<u8>> {
-		let mut client = client.write().await;
-
-		let response = timeout(
-			Duration::from_secs(5),
-			client.create_session(Request::new(request)),// this keeps getting timed out.
-		).await??;
-		let response = response.into_inner();
-
-		Ok(response.session_id)
-	}
-
-	async fn start_session(
-		client: ThreadSafe<PuncherServiceClient<Channel>>, 
-		session_id: &Vec<u8>,
-		addr: SocketAddr,
-	) -> Result<CancellationToken> {
-		// start stream //
-		let (status_tx, status_rx) = mpsc::channel(8);
-		let request = Request::new(ReceiverStream::new(status_rx));
-		
-		status_tx.send(ClientStatus { session_id: Some(session_id.clone()), status: None }).await?;
-
-		let response = {
-			let mut c = client.write().await;
-			timeout(
-				Duration::from_secs(5), 
-				c.stream_session(request),
-			).await??
-		};
-
-		let order_stream = response.into_inner();
-
-		let cancel = CancellationToken::new();
-		
-		// pings //
-		tokio::spawn(ping(status_tx.clone(), cancel.clone()));
-	
-		// orders //
-		tokio::spawn(handle_orders(order_stream, status_tx, cancel.clone(), addr, session_id.clone()));
-
-		Ok(cancel)
-	}
-
-	pub async fn end(self) {
-		let session_id = self.session_id.clone();
-		let _ = timeout(
-			Duration::from_secs(5),
-			self.inner_mut().await.end_session(Request::new(EndSessionRequest {session_id})),
-		).await;
-		self.cancel.cancel();
-	}
-
-	pub async fn create_listing(&mut self, listing: ListingNoId) -> Result<()> {
-		let session_id = self.session_id.clone();
-		let _ = timeout(
-			Duration::from_secs(5),
-			self.inner_mut().await.add_listing(Request::new( AddListingRequest { listing: Some(listing.into()), session_id } )),
-		).await??;
-		Ok(())
-	}
-
-	pub async fn remove_listing(&mut self) -> Result<()> {
-		let session_id = self.session_id.clone();
-		let _ = timeout(
-			Duration::from_secs(5), 
-			self.inner_mut().await.remove_listing(Request::new(RemoveListingRequest { session_id })),
-		).await??;
-		
-		Ok(())
-	}
-
-	pub async fn get_listings(&mut self) -> Result<Vec<Listing>> {
-		let resp = timeout(
-			Duration::from_secs(20),
-			self.inner_mut().await.get_listings(Request::new( GetListingsRequest {})),
-		).await??;
-		let resp = resp.into_inner();
-		Ok(resp
-			.listings
-			.into_iter()
-			.filter_map(|l| Listing::try_from(l).ok())
-			.collect())
-	}
-
-	pub async fn join(&mut self, listing_id: Uuid) -> Result<()> {
-		let req = Request::new(JoinRequest {
-			session_id: self.session_id.clone(),
-			target_listing_id: listing_id.as_bytes().to_vec(),
-		});
-
-		let _ = timeout(
-			Duration::from_secs(5), 
-			self.inner_mut().await.join(req),
-		).await??;
-		
-		Ok(())
-	}
-
-	
-}
-
-
-async fn ping(sender: Sender<ClientStatus>, cancel: CancellationToken) {
-	loop {
-		tokio::select! {
-			_ = sleep(Duration::from_secs(60)) => {
-				let _ = sender.send(ClientStatus { session_id: None, status: None }).await;
-			}
-			_ = cancel.cancelled() => {
-				break;
-			}
-		}
-	}
-}
-
-pub async fn punch_nat(target_addr: SocketAddr, bind_addr: SocketAddr) -> Result<()> {
-	let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
-	socket.connect(target_addr).await?;
-
-	let packet = b"punch";
-	let mut recv = [0u8; 5];
-
-	let cancel = CancellationToken::new();
-
-	let c = cancel.clone();
-	let s = socket.clone();
-	tokio::spawn(async move {
-		loop {
-			if c.is_cancelled() {
-				break;
-			}
-
-			if let Err(e) = s.send(packet).await {
-				godot_error!("Unable to send packet {e}");
-				panic!("Unable to send packet {e}");
-			}
-			
-			sleep(Duration::from_millis(300)).await;
-		}
-	});
-
-	let _ = timeout(
-		Duration::from_secs(3), 
-		socket.recv_from(&mut recv),
-	).await??; 
-	cancel.cancel();
-
-	Ok(())
-}
-
-
-async fn handle_orders(mut order_stream: Streaming<Order>, status_tx: mpsc::Sender<ClientStatus>, cancel: CancellationToken, addr: SocketAddr, session_id: Vec<u8>) {
-	loop {
-		tokio::select! {
-			msg = order_stream.next() => {
-				println!("/c received order_msg: {msg:?}");
-				if let Some(msg) = msg {
-					match msg {
-						Ok(msg) => {
-							if let Some(order) = msg.order {
-								if let Err(e) = receive_order(order, &status_tx, addr, &session_id).await {
-									godot_error!("Error handling order: {e}");
-									eprintln!("Error handling order: {e}");
-								}
-							}
-						},
-						Err(e) => {
-							godot_error!("Received error from server: {e}");
-							eprintln!("Received error from server: {e}");
-						},
-					}
-				}
-				
-			}
-			_ = cancel.cancelled() => {
-				break;
-			}
-		}
-	}
-}
-
-
-async fn receive_order(order: OrderEnum, status_tx: &mpsc::Sender<ClientStatus>, addr: SocketAddr, session_id: &Vec<u8>) -> Result<()> {
-	println!("/c handling order");
-	match order {
-		OrderEnum::Punch(pu) => {
-			let ip = pu.ip.parse::<Ipv4Addr>()?;
-			let port = pu.port.try_into()?;
-			let target_addr: SocketAddr = SocketAddr::V4(SocketAddrV4::new(ip, port));
-
-			println!("/c pre-punch");
-			match punch_nat(target_addr, addr).await {
-				Ok(_) => {
-					println!("/c punch success");
-					status_tx.send(ClientStatus { 
-						session_id: Some(session_id.clone()), 
-						status: Some(CStatus::PunchStatus(PunchStatus {
-							message: None,
-							success: true,
-						})),
-					}).await?;
-				}
-
-				Err(punch_err) => {
-					println!("/c punch failure");
-					status_tx.send(ClientStatus { 
-						session_id: Some(session_id.clone()), 
-						status: Some(CStatus::PunchStatus(PunchStatus {
-							message: Some(format!("Error punching: {punch_err}")),
-							success: false,
-						})),
-					}).await?;
-				}
-			};
-			println!("/c punched");
-
-			Ok(())
-		},
-		OrderEnum::Proxy(_) => {
-			bail!("Unimplimented");
-		}
-	}
-}
-

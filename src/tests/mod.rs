@@ -1,4 +1,4 @@
-use crate::{client::{punch_nat, Client}, server::{self, listing::ListingNoId, session::Session}};
+use crate::{client::{client::{punch_nat, Client}}, server::{self, listing::ListingNoId, session::Session}};
 use tokio::{net::UdpSocket, sync::oneshot};
 use std::{net::SocketAddr, str::FromStr, time::{Duration, Instant}};
 
