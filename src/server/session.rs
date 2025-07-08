@@ -1,17 +1,17 @@
 use std::{net::SocketAddr, sync::Arc, time::{Duration, Instant}};
-use tokio::sync::{mpsc::Sender, watch::Receiver, RwLock};
+use tokio::sync::{mpsc::{Receiver, Sender}, RwLock};
 use tonic::Status;
 use uuid::Uuid;
-use crate::{puncher::{client_status::Status as ClientStatus, Order}, server::listing::Listing};
+use crate::{listing::RustListing, proto::{client_status::Status as ClientStatus, Order as OrderStruct}, ThreadSafe};
 
-pub type SessionRef = Arc<RwLock<Session>>;
+pub type SessionRef = ThreadSafe<Session>;
 
-pub type OrderStream = Sender<Result<Order, Status>>;
+pub type OrderStream = Sender<Result<OrderStruct, Status>>;
 pub type StatusStream = Receiver<ClientStatus>;
 
 pub struct Session {
-	pub listing: Option<Listing>,
-	pub stream: Option<(OrderStream, StatusStream)>,
+	pub listing: Option<RustListing>,
+	pub streams: Option<(OrderStream, StatusStream)>,
 	id: Uuid,
 	addr: SocketAddr,
 	last_seen: Instant,
@@ -26,7 +26,7 @@ impl Session {
 			id: Uuid::new_v4(),
 			last_seen: Instant::now(),
 			listing: None,
-			stream: None,
+			streams: None,
 			timeout_time: Self::TIMEOUT_TIME,
 			addr,
 		}
@@ -45,7 +45,7 @@ impl Session {
 	}
 
 	pub fn is_valid(&self) -> bool {
-		!self.is_timed_out() && self.stream.is_some()
+		!self.is_timed_out() && self.streams.is_some()
 	}
 
 	pub fn is_timed_out(&self) -> bool {

@@ -1,4 +1,4 @@
-use crate::{client::{client::{punch_nat, Client}}, server::{self, listing::ListingNoId, session::Session}};
+use crate::{client::{punch_nat, Client}, listing::RustListingNoId, server::{run_signal, session::Session}};
 use tokio::{net::UdpSocket, sync::oneshot};
 use std::{net::SocketAddr, str::FromStr, time::{Duration, Instant}};
 
@@ -20,20 +20,20 @@ fn test_session_timeout() {
 	assert!(s.is_timed_out());
 }
 
-// -- OTHER STUFF -- //
+// -- UTIL -- //
 
 async fn test_server() -> SocketAddr {
 	let addr = ephemeral_addr().await;
 
 	let (ready_tx, ready_rx) = oneshot::channel();
-	tokio::spawn(server::run_signal(addr, ready_tx));
+	tokio::spawn(run_signal(addr, ready_tx));
 	ready_rx.await.unwrap();
 
 	addr
 }
 
 async fn test_client(server_addr: SocketAddr) -> Client {
-	Client::new(ephemeral_addr().await, server_addr).await
+	Client::new(ephemeral_addr().await, server_addr).await.unwrap()
 }
 
 async fn ephemeral_addr() -> SocketAddr {
@@ -42,33 +42,34 @@ async fn ephemeral_addr() -> SocketAddr {
 }
 
 
-// -- ACTUALLY RELEVANT STUFF -- //
+// -- RELEVANT STUFF -- //
+
 #[tokio::test]
-/* AI */ async fn listings() { // inconsistent
+/* AI */ async fn listings() {
 	let s_addr = test_server().await;
 	let mut c_1 = test_client(s_addr).await;
 	let mut c_2 = test_client(s_addr).await;
 
-	let listing = ListingNoId { name: "test listing".to_string() };
+	let listing = RustListingNoId { name: "test listing".to_string() };
 	let l = listing.clone();
-	c_1.create_listing(listing).await.expect("Failed to create listing.");
+	c_1.create_listing(listing).await.unwrap(); 
 
-	let listings = c_2.get_listings().await.expect("Failed to get listing."); // inconsistent
+	let listings = c_2.get_listings().await.unwrap();
 	assert_eq!(listings.len(), 1);
 
 	let target_listing = &listings[0];
 	assert_eq!(*target_listing.inner(), l);
 
-	let listing = ListingNoId { name: "test listing".to_string() };
-	c_2.create_listing(listing).await.expect("Failed to create listing.");
+	let listing = RustListingNoId { name: "test listing".to_string() };
+	c_2.create_listing(listing).await.unwrap();
 
-	let listings = c_2.get_listings().await.expect("Failed to get listings.");
+	let listings = c_2.get_listings().await.unwrap();
 	assert_eq!(listings.len(), 2);
 
-	c_2.remove_listing().await.expect("Failed to remove listing."); 
-	c_1.remove_listing().await.expect("Failed to remove listing.");
+	c_2.remove_listing().await.unwrap(); 
+	c_1.remove_listing().await.unwrap();
 
-	let listings = c_1.get_listings().await.expect("Failed to get listings.");
+	let listings = c_1.get_listings().await.unwrap();
 	assert_eq!(listings.len(), 0);
 }
 
@@ -86,23 +87,23 @@ async fn ephemeral_addr() -> SocketAddr {
 		},
 	);
 
-	assert!(a.is_ok() && b.is_ok(), "a: {a:?}, \nb: {b:?},");
+	assert!(a.is_ok() && b.is_ok(), "a: {a:?}, \nb: {b:?}");
 }
 
 
 #[tokio::test]
-async fn client_punching() { // inconsistent
+async fn client_punching() {
 	let s_addr = test_server().await;
 	let mut c_1 = test_client(s_addr).await;
 	let mut c_2 = test_client(s_addr).await;
 
-	let listing = ListingNoId { name: "test listing".to_string() };
-	c_1.create_listing(listing).await.expect("Failed to create listing.");
+	let listing = RustListingNoId { name: "test listing".to_string() };
+	c_1.create_listing(listing).await.unwrap();
 
-	let listings = c_2.get_listings().await.expect("Failed to get listings.");
+	let listings = c_2.get_listings().await.unwrap();
 	assert_eq!(listings.len(), 1);
 
 	let target_listing = &listings[0];
 
-	c_2.join(*target_listing.id()).await.expect("Failed to join listing.");
+	c_2.join(*target_listing.id()).await.unwrap();
 }

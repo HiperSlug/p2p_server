@@ -1,19 +1,19 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::client::ThreadSafe;
+use super::ThreadSafe;
 
-pub struct AsyncFlag<T> 
+pub struct AsyncValue<T> 
 {
 	last_poll: T,
 	thread_safe: ThreadSafe<T>,
 	signal: String,
 }
 
-impl<T> AsyncFlag<T>
+impl<T> AsyncValue<T>
 where
 	T: PartialEq + Clone + Default
 {
-	pub fn new(signal: &str) -> Self {
+	pub fn from_default(signal: &str) -> Self {
 		Self {
 			last_poll: T::default(),
 			thread_safe: Arc::new(RwLock::new(T::default())),
@@ -31,8 +31,6 @@ where
 			None
 		}
 	}
-}
 
-impl<T> AsyncFlag<T> {
 	pub fn inner(&self) -> &ThreadSafe<T> { &self.thread_safe }
 }

@@ -1,15 +1,15 @@
-use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, pin, sync::Arc};
+use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, pin, sync::Arc, time::Duration};
 use anyhow::{anyhow, bail, Result};
 use rand::random;
-use tokio::{join, sync::{mpsc, oneshot, watch, RwLock}};
+use tokio::{join, sync::{mpsc, oneshot, RwLock}, time::timeout};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming, transport::Server};
 use uuid::Uuid;
 use futures::{future::join_all, Stream, StreamExt};
-use crate::{puncher::{client_status::Status as ClientStatusEnum, order::Order as OrderEnum, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, ClientStatus, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, GetListingsRequest, GetListingsResponse, JoinRequest, JoinResponse, Order as OrderMessage, Punch, PunchStatus, RemoveListingRequest, RemoveListingResponse}, server::{listing::Listing, session::{Session, SessionRef}}};
+use crate::{listing::RustListing, proto::{client_status::Status as ClientStatusEnum, order::Order as OrderEnum, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, ClientStatus, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, GetListingsRequest, GetListingsResponse, JoinRequest, JoinResponse, Order as OrderMessage, Punch, PunchStatus, RemoveListingRequest, RemoveListingResponse}};
 
 pub mod session;
-pub mod listing;
+use session::{Session, SessionRef};
 
 pub async fn run(addr: SocketAddr) -> anyhow::Result<()> {
 	let server = PuncherServer::default();
@@ -112,7 +112,7 @@ impl PuncherServer {
 	}
 
 	pub async fn remove_timed_out_chance(&self) {
-		if random::<f32>() < 0.1 {
+		if random::<f32>() < 0.025 {
 			self.remove_timed_out().await;
 		}
 	}
@@ -124,7 +124,7 @@ impl PuncherService for PuncherServer {
 	type StreamSessionStream = pin::Pin<Box<dyn Stream<Item = Result<OrderMessage, Status>> + Send + Sync + 'static>>;
 
 	// -- listings -- //
-	async fn add_listing(
+	async fn add_listing( // ADD LISTING //
         &self,
         request: Request<AddListingRequest>,
     ) -> Result<Response<AddListingResponse>, Status> {
@@ -157,7 +157,7 @@ impl PuncherService for PuncherServer {
 		let listing_no_id_packet = request
 			.listing
 			.ok_or(Status::invalid_argument("No supplied listing."))?;
-		let listing = Listing::new(listing_no_id_packet);
+		let listing = RustListing::new(listing_no_id_packet);
 		
 
 		// assign listing //
@@ -173,17 +173,14 @@ impl PuncherService for PuncherServer {
 		Ok(Response::new(AddListingResponse { listing_id }))
     }
 
-    async fn remove_listing(
+    async fn remove_listing( // REMOVE LISTING //
         &self,
         request: Request<RemoveListingRequest>,
     ) -> Result<Response<RemoveListingResponse>, Status> {
 		self.remove_timed_out_chance().await;
-
-        let request = request.into_inner();
-
 		
 		// validate session //
-		let session_id = request.session_id.try_into()
+		let session_id = request.into_inner().session_id.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
 
 		let session = self
@@ -205,7 +202,7 @@ impl PuncherService for PuncherServer {
 		Ok(Response::new(RemoveListingResponse {}))
     }
 
-    async fn get_listings(
+    async fn get_listings( // GET LISTINGS //
         &self,
         _: Request<GetListingsRequest>,
     ) -> Result<Response<GetListingsResponse>, Status> {
@@ -217,7 +214,7 @@ impl PuncherService for PuncherServer {
 		for (_, session) in sessions.iter() {
 			let session = session.read().await;
 			if let Some(listing) = session.listing.as_ref() {
-				listings.push(listing.into());
+				listings.push(listing.clone().into());
 			}
 		}
 
@@ -225,7 +222,7 @@ impl PuncherService for PuncherServer {
     }
 
 	// -- connection -- //
-	async fn create_session(
+	async fn create_session( // CREATE SESSION //
 		&self,
 		request: Request<CreateSessionRequest>,
 	) -> Result<Response<CreateSessionResponse>, Status> {
@@ -248,18 +245,17 @@ impl PuncherService for PuncherServer {
 
 		// create session //
 		let session = Session::new_ref(addr);
-		println!("a");
+		
 		let session_id = {
 			let session = session.read().await;
 			session.id().clone()
 		};
-		println!("b");
 
 		let session_id_bytes = session_id.as_bytes().to_vec();
 
 		let mut sessions = self.sessions.write().await;
 		sessions.insert(session_id, session);
-		println!("c");
+		
 		Ok(Response::new(CreateSessionResponse { session_id: session_id_bytes }))
 	}
 
@@ -269,10 +265,10 @@ impl PuncherService for PuncherServer {
 	) -> Result<Response<Self::StreamSessionStream>, Status> {
 		let mut request = request.into_inner();
 
-		let session_id = request
-			.message()
-			.await?
-			.ok_or(Status::invalid_argument("No first ping."))?
+		let session_id = timeout(Duration::from_secs(5), request.message())
+			.await
+			.map_err(|e| Status::invalid_argument(format!("First ping timeout: {e}")))??
+			.ok_or(Status::invalid_argument("Stream Closed."))?
 			.session_id
 			.ok_or(Status::invalid_argument("No session_id in first ping."))?
 			.try_into()
@@ -285,24 +281,20 @@ impl PuncherService for PuncherServer {
 
 		let (order_tx, order_rx) = mpsc::channel(32);
 
-		let (status_tx, status_rx) = watch::channel(ClientStatusEnum::PunchStatus( PunchStatus { message: None, success: false }));
+		let (status_tx, status_rx) = mpsc::channel(8);
 		
-		
+		// handle ping then forward status to status rx
 		let s = session.clone();
 		tokio::spawn(async move {
 			while let Some(msg) = request.next().await {
 				if let Ok(status) = msg {
 					if let Some(status) = status.status {
-						println!("/s /forward status: {status:?}");
-						let rec = status_tx.receiver_count();
-						println!("/s /forward receiver count {rec}");
-						if let Err(e) = status_tx.send(status) {
+						if let Err(e) = status_tx.send(status).await {
 							eprintln!("Couldnt forward status: {e}");
 							break;
 						};
 					}
 
-					// that was a super fuckin annoying lock condition.
 					let mut session = s.write().await;
 					session.see();
 				} else {
@@ -312,7 +304,7 @@ impl PuncherService for PuncherServer {
 		});
 
 		let mut session = session.write().await;
-		session.stream = Some((order_tx, status_rx));
+		session.streams = Some((order_tx, status_rx));
 
 		let stream = Box::pin(ReceiverStream::new(order_rx)) as Self::StreamSessionStream;
 		Ok(Response::new(stream))
@@ -370,66 +362,19 @@ impl PuncherService for PuncherServer {
 
 		// send both clients punch orders //
 
-		let (target_ip, target_port) = {
+		let target_addr = {
 			let target_session = target_session.write().await;
-			let addr = target_session.addr();
-			(addr.ip().to_string(), addr.port().into())
+			target_session.addr().clone()
 		};
 
-		let (ip, port) = {
+		let addr = {
 			let session = session.write().await;
-			let addr = session.addr();
-			(addr.ip().to_string(), addr.port().into())
+			session.addr().clone()
 		};
 
 
-		let (resp, target_resp): (Result<PunchStatus>, Result<PunchStatus>) = join!(
-			async move {
-				let mut session = session.write().await;
-				let (tx, rx) = session.stream.as_mut().ok_or(anyhow!("No stream found on a validated session."))?;
+		let (resp, target_resp) = join!(order_punch(session, target_addr), order_punch(target_session, addr));
 
-				let order = Ok(OrderMessage {
-					order: Some(OrderEnum::Punch(Punch {
-						ip: target_ip,
-						port: target_port,
-					})),
-				});
-
-				// rx.mark_unchanged();
-				println!("/s /j /s pre-sent");
-				tx.send(order).await.map_err(|e| anyhow!("Unable to send order: {e}"))?;
-				println!("/s /j /s sent");
-				rx.changed().await.map_err(|e| anyhow!("Receiving error: {e}"))?;
-				println!("/s /j /s received status");
-				match &*rx.borrow() {
-					ClientStatusEnum::PunchStatus(status) => Ok(status.clone()),
-				}
-			},
-
-			async move {
-				let mut target_session = target_session.write().await;
-				let (tx, rx) = target_session.stream.as_mut().ok_or(anyhow!("No stream found on a validated session."))?;
-
-				let order = Ok(OrderMessage {
-					order: Some(OrderEnum::Punch(Punch {
-						ip: ip,
-						port: port,
-					})),
-				});
-
-				// rx.mark_unchanged();
-				println!("/s /j /t pre-sent");
-				tx.send(order).await.map_err(|e| anyhow!("Unable to send order: {e}"))?;
-				println!("/s /j /t sent");
-				rx.changed().await.map_err(|e| anyhow!("Receiving error: {e}"))?;
-				println!("/s /j /t received status");
-				match &*rx.borrow() {
-					ClientStatusEnum::PunchStatus(status) => Ok(status.clone()),
-				}
-			},
-		);
-
-		println!("/s /j send punch orders and received response.");
 
 		let resp = match resp {
 			Ok(r) => r,
@@ -462,4 +407,21 @@ impl PuncherService for PuncherServer {
 
 		Ok(Response::new(JoinResponse { }))
 	}
+}
+
+async fn order_punch(session: SessionRef, addr: SocketAddr) -> Result<PunchStatus> {
+	let mut session = session.write().await;
+	let (tx, rx) = session.streams.as_mut().ok_or(anyhow!("No stream found on a validated session."))?;
+
+	let order = Ok(OrderMessage {
+		order: Some(OrderEnum::Punch(Punch {
+			ip: addr.ip().to_string(),
+			port: addr.port().into(),
+		})),
+	});
+
+	tx.send(order).await.map_err(|e| anyhow!("Unable to send order: {e}"))?;
+	let ClientStatusEnum::PunchStatus(s) = timeout(Duration::from_secs(5), rx.recv()).await?.ok_or(anyhow!("Channel closed."))? /* else { bail!("Incorrect status type received.") } */;
+
+	Ok(s)
 }

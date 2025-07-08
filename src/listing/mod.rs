@@ -1,0 +1,145 @@
+use godot::prelude::*;
+use anyhow::{anyhow, Error, Result};
+use uuid::Uuid;
+use crate::proto::{Listing as TonicListing, ListingNoId as TonicListingNoId};
+
+// ---- RUST ---- //
+
+// Rust Listing //
+#[derive(Debug, PartialEq, Clone)]
+pub struct RustListing {
+	listing_no_id: RustListingNoId,
+	id: Uuid,
+}
+
+impl RustListing {
+	pub fn new(listing_no_id: impl Into<RustListingNoId>) -> Self {
+		Self {
+			listing_no_id: listing_no_id.into(),
+			id: Uuid::new_v4(),
+		}
+	}
+
+	pub fn id(&self) -> &Uuid {&self.id}
+
+	pub fn inner(&self) -> &RustListingNoId {&self.listing_no_id}
+
+	pub fn into_inner(self) -> RustListingNoId {self.listing_no_id}
+}
+
+impl TryFrom<TonicListing> for RustListing {
+	type Error = Error;
+
+	fn try_from(listing_packet: TonicListing) -> Result<Self> {
+		Ok(Self {
+			listing_no_id: listing_packet
+				.listing_no_id
+				.ok_or(anyhow!("Empty inner listing."))?
+				.into(),
+			id: listing_packet.id.try_into()?,
+		})
+	}
+}
+
+
+// RUST ListingNoId //
+#[derive(Clone, Debug, PartialEq)]
+pub struct RustListingNoId {
+	pub name: String, 
+}
+
+impl From<TonicListingNoId> for RustListingNoId {
+	fn from(listing_no_id_packet: TonicListingNoId) -> Self {
+		Self {
+			name: listing_no_id_packet.name,
+		}
+	}
+}
+
+impl From<GodotListingNoId> for RustListingNoId {
+	fn from(gd_listing_no_id: GodotListingNoId) -> Self {
+		Self {
+			name: gd_listing_no_id.name.into(),
+		}
+	}
+}
+
+
+// ---- TONIC ---- //
+
+// TONIC Listing //
+impl From<RustListing> for TonicListing {
+	fn from(listing: RustListing) -> Self {
+		Self {
+			listing_no_id: Some(listing.listing_no_id.into()),
+			id: listing.id.into(),
+		}
+	}
+}
+
+
+// TONIC ListingNoId //
+impl From<RustListingNoId> for TonicListingNoId {
+	fn from(listing_no_id: RustListingNoId) -> Self {
+		Self {
+			name: listing_no_id.name,
+		}
+	}
+}
+
+
+// ---- GODOT ---- //
+
+// GODOT Listing //
+#[derive(GodotClass)]
+#[class(base=RefCounted)]
+#[allow(dead_code)]
+pub struct GodotListing {
+	id: String,
+	listing_no_id: GodotListingNoId,
+}
+
+#[godot_api]
+impl IRefCounted for GodotListing {
+	fn init(_: Base<RefCounted>) -> Self { 
+		Self {
+			id: Uuid::new_v4().to_string(),
+			listing_no_id: GodotListingNoId { name: GString::new() },
+		}
+	}
+}
+
+impl From<RustListing> for GodotListing {
+	fn from(listing: RustListing) -> Self {
+		Self {
+			id: listing.id().to_string(),
+			listing_no_id: listing.into_inner().into(),
+		}
+	}
+}
+
+
+// GODOT ListingNoId //
+#[derive(GodotClass, Clone)]
+#[class(base=RefCounted)]
+pub struct GodotListingNoId {
+	#[export]
+	pub name: GString,
+}
+
+#[godot_api]
+impl IRefCounted for GodotListingNoId   {
+	fn init(_: Base<RefCounted>) -> Self { 
+		Self {
+			name: String::new().into(),
+		}
+	}
+}
+
+impl From<RustListingNoId> for GodotListingNoId {
+	fn from(listing_no_id: RustListingNoId) -> Self {
+		Self {
+			name: listing_no_id.name.into(),
+		}
+	}
+}
