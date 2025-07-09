@@ -128,6 +128,7 @@ impl PuncherService for PuncherServer {
         &self,
         request: Request<AddListingRequest>,
     ) -> Result<Response<AddListingResponse>, Status> {
+		println!("Add listing req");
 		self.remove_timed_out_chance().await;
 
 		let request = request.into_inner();
@@ -177,6 +178,7 @@ impl PuncherService for PuncherServer {
         &self,
         request: Request<RemoveListingRequest>,
     ) -> Result<Response<RemoveListingResponse>, Status> {
+		println!("Remove listing req");
 		self.remove_timed_out_chance().await;
 		
 		// validate session //
@@ -206,6 +208,8 @@ impl PuncherService for PuncherServer {
         &self,
         _: Request<GetListingsRequest>,
     ) -> Result<Response<GetListingsResponse>, Status> {
+		println!("Get listing req");
+
 		self.remove_timed_out_chance().await;
 
 
@@ -226,6 +230,8 @@ impl PuncherService for PuncherServer {
 		&self,
 		request: Request<CreateSessionRequest>,
 	) -> Result<Response<CreateSessionResponse>, Status> {
+		println!("Create session req");
+		
 		self.remove_timed_out_chance().await;
 
 		let request = request.into_inner();
@@ -263,6 +269,8 @@ impl PuncherService for PuncherServer {
 		&self,
 		request: Request<Streaming<ClientStatus>>,
 	) -> Result<Response<Self::StreamSessionStream>, Status> {
+		println!("Stream session req");
+
 		let mut request = request.into_inner();
 
 		let session_id = timeout(Duration::from_secs(5), request.message())
@@ -314,6 +322,8 @@ impl PuncherService for PuncherServer {
 		&self,
 		request: Request<EndSessionRequest>,
 	) -> Result<Response<EndSessionResponse>, Status> {
+		println!("End session req");
+
 		self.remove_timed_out_chance().await;
 
 		let session_id = request
@@ -331,6 +341,8 @@ impl PuncherService for PuncherServer {
 		&self,
 		request: Request<JoinRequest>
 	) -> Result<Response<JoinResponse>, Status> {
+		println!("Join session req");
+
 		let request = request.into_inner();
 
 		// validate session //

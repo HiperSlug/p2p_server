@@ -95,16 +95,18 @@ impl From<RustListingNoId> for TonicListingNoId {
 #[class(base=RefCounted)]
 #[allow(dead_code)]
 pub struct GodotListing {
-	id: String,
-	listing_no_id: GodotListingNoId,
+	#[var]
+	id: GString,
+	#[var]
+	listing_no_id: Gd<GodotListingNoId>,
 }
 
 #[godot_api]
 impl IRefCounted for GodotListing {
 	fn init(_: Base<RefCounted>) -> Self { 
 		Self {
-			id: Uuid::new_v4().to_string(),
-			listing_no_id: GodotListingNoId { name: GString::new() },
+			id: Uuid::new_v4().to_string().into(),
+			listing_no_id: Gd::from_init_fn(|b|GodotListingNoId::init(b)),
 		}
 	}
 }
@@ -112,8 +114,8 @@ impl IRefCounted for GodotListing {
 impl From<RustListing> for GodotListing {
 	fn from(listing: RustListing) -> Self {
 		Self {
-			id: listing.id().to_string(),
-			listing_no_id: listing.into_inner().into(),
+			id: listing.id().to_string().into(),
+			listing_no_id: Gd::from_object(listing.into_inner().into()),
 		}
 	}
 }
@@ -123,7 +125,7 @@ impl From<RustListing> for GodotListing {
 #[derive(GodotClass, Clone)]
 #[class(base=RefCounted)]
 pub struct GodotListingNoId {
-	#[export]
+	#[var]
 	pub name: GString,
 }
 
