@@ -109,18 +109,7 @@ impl PunchingClient {
 	pub fn async_error(msg: GString);
 
 	#[func]
-	pub fn connect(&self, server_ip: String, server_port: u16, ip: String, port: u16) {
-		
-		// parse addrs //
-		let server_ip = match server_ip.parse() {
-			Ok(ip) => ip,
-			Err(e) => {
-				godot_error!("Could not parse server_ip: {e}.");
-				return;
-			}
-		};
-		let server_addr = SocketAddr::V4(SocketAddrV4::new(server_ip, server_port));
-
+	pub fn connect(&self, server_url: String, server_port: u16, ip: String, port: u16) {
 		let ip = match ip.parse() {
 			Ok(ip) => ip,
 			Err(e) => {
@@ -138,7 +127,7 @@ impl PunchingClient {
 		
 		
 		let fut = async move {
-			let new_client = match Client::new(addr, server_addr, joined_dst).await {
+			let new_client = match Client::new(addr, server_url, server_port, joined_dst).await {
 				Ok(c) => c,
 				Err(e) => {
 					let mut err = error.write().await;

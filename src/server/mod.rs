@@ -353,7 +353,6 @@ impl PuncherService for PuncherServer {
 			.validate(&session_id)
 			.await
 			.map_err(|e| Status::invalid_argument(format!("Invalid session id: {e}")))?;
-		println!("s/ j/ Validated session.");
 
 		// validate target session //
 		let target_listing_id = request
@@ -370,7 +369,6 @@ impl PuncherService for PuncherServer {
 			.validate(&target_session_id)
 			.await
 			.map_err(|e| Status::invalid_argument(format!("Invalid session id: {e}")))?;
-		println!("s/ j/ Validateed target session.");
 
 		// send both clients punch orders //
 

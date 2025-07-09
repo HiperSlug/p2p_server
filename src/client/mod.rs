@@ -28,10 +28,11 @@ impl Client {
 
 	pub async fn new(
 		addr: SocketAddr, 
-		server_addr: SocketAddr,
+		server_url: String,
+		server_port: u16,
 		joined_dst: ThreadSafe<Vec<SocketAddr>>,
 	) -> Result<Self> {
-		let client = create_threadsafe_client(server_addr).await?;
+		let client = create_threadsafe_client(server_url, server_port).await?;
 		
 		let session_id = create_session(client.clone(), addr).await?;
 
@@ -121,9 +122,10 @@ impl Client {
 }
 
 async fn create_threadsafe_client(
-	server_addr: SocketAddr,
+	server_url: String,
+	port: u16,
 ) -> Result<ThreadSafe<PuncherServiceClient<Channel>>> {
-	let uri = format!("https://{server_addr}").parse()?;
+	let uri = format!("{server_url}:{port}").parse()?;
 	let channel = Channel::builder(uri).connect().await?;
 
 	Ok(Arc::new(RwLock::new(PuncherServiceClient::new(channel))))
@@ -172,8 +174,8 @@ async fn start_session(
 	Ok(stream_handler)
 }
 
-pub async fn punch_nat(target_addr: SocketAddr, bind_addr: SocketAddr) -> Result<()> {
-	let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
+pub async fn punch_nat(target_addr: SocketAddr, _: SocketAddr) -> Result<()> {
+	let socket = Arc::new(UdpSocket::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap()).await?);
 	socket.connect(target_addr).await?;
 
 	let packet = b"punch";
@@ -190,7 +192,7 @@ pub async fn punch_nat(target_addr: SocketAddr, bind_addr: SocketAddr) -> Result
 			}
 		} => {},
 
-		res = timeout(TIMEOUT, socket.recv_from(&mut recv)) => {
+		res = timeout(TIMEOUT, socket.recv(&mut recv)) => {
 			res??;
 		},
 	};

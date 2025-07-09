@@ -34,7 +34,7 @@ async fn test_server() -> SocketAddr {
 
 async fn test_client(server_addr: SocketAddr) -> (Client, ThreadSafe<Vec<SocketAddr>>) {
 	let dst = Arc::new(RwLock::new(Vec::new()));
-	(Client::new(ephemeral_addr().await, server_addr, dst.clone()).await.unwrap(), dst)
+	(Client::new(ephemeral_addr().await, "http://127.0.0.1".to_string(), server_addr.port(), dst.clone()).await.unwrap(), dst)
 }
 
 async fn ephemeral_addr() -> SocketAddr {

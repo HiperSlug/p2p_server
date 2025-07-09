@@ -9,8 +9,8 @@ func _ready() -> void:
 	signals()
 	
 	addr = await Stun.pub_addr().recv
-	
-	client.connect("127.0.0.1", 3000, addr.ip, addr.port) 
+	print(addr)
+	client.connect("https://p2p-server-s5wb.onrender.com", 5000, addr.ip, addr.port) 
 	print(await client.connection_changed)
 
 func signals():
@@ -55,27 +55,17 @@ func _on_host_pressed() -> void:
 
 
 
-@onready var cont: VBoxContainer = $VBoxContainer2
+@onready var cont: VBoxContainer = $Control/VBoxContainer2
 const LABEL = preload("res://lable/label.tscn")
 func _on_refresh_pressed() -> void:
 	
 	
 	client.get_listings()
 
-
-func join(addr: String):
-	if hosting:
-		as_server()
-	else:
-		as_client(addr)
+func join(id: String):
+	print("join: " + id)
+	client.join_listing(id)
 
 
-func as_server():
-	var peer = WebSocketMultiplayerPeer.new()
-	peer.create_server(443)
-	multiplayer.multiplayer_peer = peer
-
-func as_client(addr: String):
-	var peer = WebSocketMultiplayerPeer.new()
-	peer.create_client("ws://" + addr)
-	multiplayer.multiplayer_peer = peer
+func _on_cancel_host_pressed() -> void:
+	client.remove_listing()
