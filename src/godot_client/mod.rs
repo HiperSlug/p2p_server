@@ -19,6 +19,7 @@ struct PunchingClient {
 	base: Base<Node>,
 	client: ThreadSafe<Option<Client>>,
 	
+	errors: AsyncValue<String>,
 	connected: AsyncValue<bool>,
 	listings: AsyncValue<Option<Vec<RustListing>>>,
 	owned_listing: AsyncValue<Option<String>>,
@@ -40,12 +41,17 @@ impl INode for PunchingClient {
 			listings: AsyncValue::from_default("listings_changed"),
 			owned_listing: AsyncValue::from_default("owned_listing_changed"),
 			joined_dst: AsyncValue::from_default("joined_addrs_changed"),
+			errors: AsyncValue::from_default("async_error"),
 		}
 	}
 
 	fn physics_process(&mut self, _: f64) {
 		
 		let mut base = self.base().clone();
+
+		if let Some((sig, error)) = self.errors.poll() {
+			base.emit_signal(sig, &[error.to_variant()]);
+		}
 
 		if let Some((sig, val)) = self.connected.poll() {
 			base.emit_signal(sig, &[val.to_variant()]);
@@ -99,6 +105,8 @@ impl PunchingClient {
 	pub fn owned_listing_changed(new_owned_listing: Variant);
 	#[signal]
 	pub fn joined_addrs_changed(new_joined_addr: Variant);
+	#[signal]
+	pub fn async_error(msg: GString);
 
 	#[func]
 	pub fn connect(&self, server_ip: String, server_port: u16, ip: String, port: u16) {
@@ -126,13 +134,15 @@ impl PunchingClient {
 		let client = self.client.clone();
 		let connected_flag = self.connected.inner().clone();
 		let joined_dst = self.joined_dst.inner().clone();
+		let error = self.errors.inner().clone();
 		
 		
 		let fut = async move {
 			let new_client = match Client::new(addr, server_addr, joined_dst).await {
 				Ok(c) => c,
 				Err(e) => {
-					godot_error!("Unable to make new client: {e}");
+					let mut err = error.write().await;
+					*err = e.to_string();
 					return;
 				},
 			};
@@ -157,10 +167,13 @@ impl PunchingClient {
 			}
 		};
 		let joined_dst = self.joined_dst.inner().clone();
+		let error = self.errors.inner().clone();
+
 		handle().spawn(async move {
 			let mut joined_dst = joined_dst.write().await;
 			if index >= joined_dst.len() {
-				godot_error!("Remove joined index out of bounds");
+				let mut err = error.write().await;
+				*err = String::from("Index out of bounds");
 				return;
 			}
 			joined_dst.remove(index);
@@ -171,14 +184,16 @@ impl PunchingClient {
 	pub fn disconnect(&self) {
 		let client = self.client.clone();
 		let connected_flag = self.connected.inner().clone();
-		
+		let error = self.errors.inner().clone();
+
 		handle().spawn( async move {
 			let mut client = client.write().await;
 			let c = client.take();
 			if let Some(c) = c {
 				c.end().await;
 			} else {
-				godot_error!("Disconnected a non-connected Client.");
+				let mut err = error.write().await;
+				*err = String::from("Not connected");
 			}
 
 			let mut flag = connected_flag.write().await;
@@ -191,18 +206,21 @@ impl PunchingClient {
 		let client = self.client.clone();
 		let listing = RustListingNoId::from(listing.bind().clone());
 		let owned_listing_flag = self.owned_listing.inner().clone();
+		let error = self.errors.inner().clone();
 
 		handle().spawn(async move {
 			let mut client = client.write().await;
 			let Some(c) = client.as_mut() else {
-				godot_error!("Client not connected when creating listing.");
+				let mut err = error.write().await;
+				*err = String::from("Not connected");
 				return;
 			};
 
 			let listing_id = match c.create_listing(listing).await {
 				Ok(l) => l,
 				Err(e) => {
-					godot_error!("Couldnt create listing: {e}.");
+					let mut err = error.write().await;
+					*err = e.to_string();
 					return;
 				}
 			};
@@ -216,16 +234,19 @@ impl PunchingClient {
 	pub fn remove_listing(&self) {
 		let client = self.client.clone();
 		let owned_listing_flag = self.owned_listing.inner().clone();
+		let error = self.errors.inner().clone();
 
 		handle().spawn(async move {
 			let mut client = client.write().await;
 			let Some(c) = client.as_mut() else {
-				godot_error!("Client not connected when removing listing.");
+				let mut err = error.write().await;
+				*err = String::from("Not connected");
 				return;
 			};
 
 			if let Err(e) = c.remove_listing().await {
-				godot_error!("Couldnt remove listing: {e}");
+				let mut err = error.write().await;
+				*err = e.to_string();
 				return;
 			};
 
@@ -238,18 +259,21 @@ impl PunchingClient {
 	pub fn get_listings(&self) {
 		let client = self.client.clone();
 		let client_listings = self.listings.inner().clone();
+		let error = self.errors.inner().clone();
 
 		handle().spawn(async move {
 			let mut client = client.write().await;
 			let Some(c) = client.as_mut() else {
-				godot_error!("Client not connected when getting listings.");
+				let mut err = error.write().await;
+				*err = String::from("Not connected");
 				return;
 			};
 
 			let listings = match c.get_listings().await {
 				Ok(l) => l,
 				Err(e) => {
-					godot_error!("Couldnt get listings: {e}");
+					let mut err = error.write().await;
+					*err = e.to_string();
 					return
 				}
 			};
@@ -271,16 +295,19 @@ impl PunchingClient {
 		};
 
 		let client = self.client.clone();
+		let error = self.errors.inner().clone();
 
 		handle().spawn(async move {
 			let mut client = client.write().await;
 			let Some(c) = client.as_mut() else {
-				godot_error!("Client not connected when getting listings.");
+				let mut err = error.write().await;
+				*err = String::from("Not connected");
 				return;
 			};
 
 			if let Err(e) = c.join(listing_id).await {
-				godot_error!("Error while joining listing: {e}");
+				let mut err = error.write().await;
+				*err = e.to_string();
 				return;
 			};
 		});
