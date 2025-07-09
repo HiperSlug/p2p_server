@@ -21,12 +21,12 @@ where
 		}
 	}
 
-	pub fn poll(&mut self) -> Option<(&String, &T)> {
+	pub fn poll(&mut self) -> Option<(&String, T)> {
 		let Ok(val) = self.thread_safe.try_read() else { return None };
 		
 		if self.last_poll != (*val) {
 			self.last_poll = val.clone();
-			Some((&self.signal, &self.last_poll))
+			Some((&self.signal, val.clone()))
 		} else {
 			None
 		}

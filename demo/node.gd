@@ -1,12 +1,12 @@
 extends Node
 
 var addr: Dictionary = {}
-var client := PunchingClient.new()
+@onready var client: PunchingClient = $PunchingClient
 
 func _ready() -> void:
 	addr = await Stun.pub_addr().recv
 	print(addr)
-	client.connect("127.0.0.1", 3000, addr.ip, addr.port)
+	client.connect("127.0.0.1", 3000, addr.ip, addr.port) 
 	print(await client.connection_changed)
 
 

@@ -1,6 +1,6 @@
 use std::{net::{SocketAddr, SocketAddrV4}, sync::{Arc, OnceLock}};
-use godot::prelude::*;
-use tokio::{runtime::{Handle, Runtime}, sync::RwLock};
+use godot::{obj::WithBaseField, prelude::*};
+use tokio::{runtime::{self, Handle, Runtime}, sync::RwLock};
 use crate::{client::Client, listing::{GodotListing, GodotListingNoId, RustListing, RustListingNoId}, ThreadSafe};
 
 mod asyncvalue;
@@ -10,15 +10,13 @@ use asyncvalue::AsyncValue;
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 fn handle() -> Handle {
-	RUNTIME.get_or_init(|| { Runtime::new().unwrap() }).handle().clone()
+	RUNTIME.get_or_init(|| { runtime::Builder::new_multi_thread().enable_all().build().unwrap() }).handle().clone()
 }
 
-
-
 #[derive(GodotClass)]
-#[class(base=RefCounted)]
+#[class(base=Node)]
 struct PunchingClient {
-	base: Base<RefCounted>,
+	base: Base<Node>,
 	client: ThreadSafe<Option<Client>>,
 	
 	connected: AsyncValue<bool>,
@@ -28,8 +26,12 @@ struct PunchingClient {
 }
 
 #[godot_api]
-impl IRefCounted for PunchingClient {
-	fn init(base: Base<RefCounted>) -> Self { 
+impl INode for PunchingClient {
+	fn enter_tree(&mut self) {
+		self.base_mut().set_physics_process(true);
+	}
+
+	fn init(base: Base<Node>) -> Self { 
 		Self {
 			base,
 			client: Arc::new(RwLock::new(None)),
@@ -40,12 +42,9 @@ impl IRefCounted for PunchingClient {
 			joined_dst: AsyncValue::from_default("joined_addrs_changed"),
 		}
 	}
-}
 
-#[godot_api]
-impl PunchingClient {
-	#[func]
-	pub fn _physics_process(&mut self, _: f64) {
+	fn physics_process(&mut self, _: f64) {
+		
 		let mut base = self.base().clone();
 
 		if let Some((sig, val)) = self.connected.poll() {
@@ -88,7 +87,10 @@ impl PunchingClient {
 			base.emit_signal(sig, &[val.to_variant()]);
 		};
 	}
-	
+}
+
+#[godot_api]
+impl PunchingClient {
 	#[signal]
 	pub fn connection_changed(new_connection: Variant);
 	#[signal]
@@ -126,9 +128,7 @@ impl PunchingClient {
 		let joined_dst = self.joined_dst.inner().clone();
 		
 		
-		godot_print!("pre");
-		handle().block_on(async {
-			godot_print!("AHH");
+		let fut = async move {
 			let new_client = match Client::new(addr, server_addr, joined_dst).await {
 				Ok(c) => c,
 				Err(e) => {
@@ -136,15 +136,15 @@ impl PunchingClient {
 					return;
 				},
 			};
-			
+
 			let mut client = client.write().await;
 			*client = Some(new_client);
-			
+
 			let mut flag = connected_flag.write().await;
 			*flag = true;
-		});
+		};
 
-		godot_print!("post"); // prints
+		handle().spawn(fut);
 	}
 
 	#[func]
@@ -157,7 +157,7 @@ impl PunchingClient {
 			}
 		};
 		let joined_dst = self.joined_dst.inner().clone();
-		handle().block_on(async move {
+		handle().spawn(async move {
 			let mut joined_dst = joined_dst.write().await;
 			if index >= joined_dst.len() {
 				godot_error!("Remove joined index out of bounds");
@@ -172,7 +172,7 @@ impl PunchingClient {
 		let client = self.client.clone();
 		let connected_flag = self.connected.inner().clone();
 		
-		handle().block_on( async move {
+		handle().spawn( async move {
 			let mut client = client.write().await;
 			let c = client.take();
 			if let Some(c) = c {
@@ -192,7 +192,7 @@ impl PunchingClient {
 		let listing = RustListingNoId::from(listing.bind().clone());
 		let owned_listing_flag = self.owned_listing.inner().clone();
 
-		handle().block_on(async move {
+		handle().spawn(async move {
 			let mut client = client.write().await;
 			let Some(c) = client.as_mut() else {
 				godot_error!("Client not connected when creating listing.");
@@ -217,7 +217,7 @@ impl PunchingClient {
 		let client = self.client.clone();
 		let owned_listing_flag = self.owned_listing.inner().clone();
 
-		handle().block_on(async move {
+		handle().spawn(async move {
 			let mut client = client.write().await;
 			let Some(c) = client.as_mut() else {
 				godot_error!("Client not connected when removing listing.");
@@ -239,7 +239,7 @@ impl PunchingClient {
 		let client = self.client.clone();
 		let client_listings = self.listings.inner().clone();
 
-		handle().block_on(async move {
+		handle().spawn(async move {
 			let mut client = client.write().await;
 			let Some(c) = client.as_mut() else {
 				godot_error!("Client not connected when getting listings.");
@@ -272,7 +272,7 @@ impl PunchingClient {
 
 		let client = self.client.clone();
 
-		handle().block_on(async move {
+		handle().spawn(async move {
 			let mut client = client.write().await;
 			let Some(c) = client.as_mut() else {
 				godot_error!("Client not connected when getting listings.");
