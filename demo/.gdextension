@@ -1,0 +1,14 @@
+[configuration]
+entry_symbol = "gdext_rust_init"
+compatibility_minimum = 4.1
+reloadable = true
+
+[libraries]
+linux.debug.x86_64 =     "res://../target/debug/libnat_puncher.so"
+linux.release.x86_64 =   "res://../target/release/libnat_puncher.so"
+windows.debug.x86_64 =   "res://../target/debug/nat_puncher.dll"
+windows.release.x86_64 = "res://../target/release/nat_puncher.dll"
+macos.debug =            "res://../target/debug/libnat_puncher.dylib"
+macos.release =          "res://../target/release/libnat_puncher.dylib"
+macos.debug.arm64 =      "res://../target/debug/libnat_puncher.dylib"
+macos.release.arm64 =    "res://../target/release/libnat_puncher.dylib"

@@ -15,7 +15,6 @@ pub struct Client {
 	client: ThreadSafe<PuncherServiceClient<Channel>>,
 	session_id: Uuid,
 	stream_handler: Arc<StreamHandler>,
-	
 }
 
 impl Client {

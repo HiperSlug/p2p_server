@@ -19,8 +19,8 @@ tokio-util = "0.7.15"
 name = "nat_puncher_server"
 path = "src/main.rs"
 
-#[lib]
-#crate-type = ["cdylib", "rlib"]
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]
 tonic-build = "0.13.1"
