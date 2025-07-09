@@ -7,4 +7,4 @@ curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v25.3/$PR
 unzip -o $PROTOC_ZIP -d $HOME/.protoc
 export PATH="$HOME/.protoc/bin:$PATH"
 
-cargo build --release
+cargo build

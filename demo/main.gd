@@ -10,7 +10,7 @@ func _ready() -> void:
 	
 	addr = await Stun.pub_addr().recv
 	print(addr)
-	client.connect("https://p2p-server-s5wb.onrender.com", 5000, addr.ip, addr.port) 
+	client.connect("https://p2p-server-s5wb.onrender.com", 3000, addr.ip, addr.port) 
 	print(await client.connection_changed)
 
 func signals():
