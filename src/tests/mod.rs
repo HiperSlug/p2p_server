@@ -1,6 +1,6 @@
-use crate::{client::{punch_nat, Client}, listing::RustListingNoId, server::{run_signal, session::Session}};
-use tokio::{net::UdpSocket, sync::oneshot};
-use std::{net::SocketAddr, str::FromStr, time::{Duration, Instant}};
+use crate::{client::{punch_nat, Client}, listing::RustListingNoId, server::{run_signal, session::Session}, ThreadSafe};
+use tokio::{net::UdpSocket, sync::{oneshot, RwLock}};
+use std::{net::SocketAddr, str::FromStr, sync::Arc, time::{Duration, Instant}};
 
 // -- SESSION -- //
 #[test]
@@ -32,8 +32,9 @@ async fn test_server() -> SocketAddr {
 	addr
 }
 
-async fn test_client(server_addr: SocketAddr) -> Client {
-	Client::new(ephemeral_addr().await, server_addr).await.unwrap()
+async fn test_client(server_addr: SocketAddr) -> (Client, ThreadSafe<Vec<SocketAddr>>) {
+	let dst = Arc::new(RwLock::new(Vec::new()));
+	(Client::new(ephemeral_addr().await, server_addr, dst.clone()).await.unwrap(), dst)
 }
 
 async fn ephemeral_addr() -> SocketAddr {
@@ -47,8 +48,8 @@ async fn ephemeral_addr() -> SocketAddr {
 #[tokio::test]
 /* AI */ async fn listings() {
 	let s_addr = test_server().await;
-	let mut c_1 = test_client(s_addr).await;
-	let mut c_2 = test_client(s_addr).await;
+	let (mut c_1, _) = test_client(s_addr).await;
+	let (mut c_2, _) = test_client(s_addr).await;
 
 	let listing = RustListingNoId { name: "test listing".to_string() };
 	let l = listing.clone();
@@ -94,9 +95,10 @@ async fn ephemeral_addr() -> SocketAddr {
 #[tokio::test]
 async fn client_punching() {
 	let s_addr = test_server().await;
-	let mut c_1 = test_client(s_addr).await;
-	let mut c_2 = test_client(s_addr).await;
-
+	let (mut c_1, dst_1) = test_client(s_addr).await;
+	let (mut c_2, dst_2) = test_client(s_addr).await;
+	
+	
 	let listing = RustListingNoId { name: "test listing".to_string() };
 	c_1.create_listing(listing).await.unwrap();
 
@@ -104,6 +106,21 @@ async fn client_punching() {
 	assert_eq!(listings.len(), 1);
 
 	let target_listing = &listings[0];
+	
+	{
+		let dst_1 = dst_1.read().await;
+		let dst_2 = dst_2.read().await;
+		assert_eq!(dst_1.len(), 0);
+		assert_eq!(dst_2.len(), 0);
+	}
+	
 
 	c_2.join(*target_listing.id()).await.unwrap();
+
+	{
+		let dst_1 = dst_1.read().await;
+		let dst_2 = dst_2.read().await;
+		assert_eq!(dst_1.len(), 1);
+		assert_eq!(dst_2.len(), 1);
+	}
 }

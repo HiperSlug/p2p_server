@@ -29,13 +29,14 @@ impl Client {
 
 	pub async fn new(
 		addr: SocketAddr, 
-		server_addr: SocketAddr
+		server_addr: SocketAddr,
+		joined_dst: ThreadSafe<Vec<SocketAddr>>,
 	) -> Result<Self> {
 		let client = create_threadsafe_client(server_addr).await?;
 		
 		let session_id = create_session(client.clone(), addr).await?;
 
-		let stream_handler = start_session(client.clone(), &session_id, addr).await?;
+		let stream_handler = start_session(client.clone(), &session_id, addr, joined_dst).await?;
 		
 		Ok(Self {
 			client,
@@ -151,6 +152,7 @@ async fn start_session(
 	client: ThreadSafe<PuncherServiceClient<Channel>>, 
 	session_id: &Uuid,
 	addr: SocketAddr,
+	joined_dst: ThreadSafe<Vec<SocketAddr>>,
 ) -> Result<Arc<StreamHandler>> {
 	let (status_tx, status_rx) = mpsc::channel(8);
 	let request = Request::new(ReceiverStream::new(status_rx));
@@ -165,7 +167,7 @@ async fn start_session(
 		).await??
 	};
 
-	let stream_handler = StreamHandler::new(status_tx, addr);
+	let stream_handler = StreamHandler::new(status_tx, addr, joined_dst);
 	tokio::spawn(stream_handler.clone().start(response.into_inner()));
 
 	Ok(stream_handler)

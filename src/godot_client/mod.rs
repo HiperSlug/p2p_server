@@ -6,8 +6,6 @@ use crate::{client::Client, listing::{GodotListing, GodotListingNoId, RustListin
 mod asyncvalue;
 use asyncvalue::AsyncValue;
 
-// TODO GIVE GODOT CLIENT THE JOINED ADDR //
-
 #[derive(GodotClass)]
 #[class(base=RefCounted)]
 struct PunchingClient {
@@ -17,7 +15,7 @@ struct PunchingClient {
 	connected: AsyncValue<bool>,
 	listings: AsyncValue<Option<Array<Gd<GodotListing>>>>,
 	owned_listing: AsyncValue<Option<String>>,
-	joined_addr: AsyncValue<Option<(String, u16)>>, // TODO
+	joined_dst: AsyncValue<Vec<SocketAddr>>,
 }
 
 #[godot_api]
@@ -29,7 +27,7 @@ impl IRefCounted for PunchingClient {
 		connected: AsyncValue::from_default("connection_changed"),
 		listings: AsyncValue::from_default("listings_changed"),
 		owned_listing: AsyncValue::from_default("owned_listing_changed"),
-		joined_addr: AsyncValue::from_default("joined_addr_changed"),
+		joined_dst: AsyncValue::from_default("joined_addrs_changed"),
 	}}
 }
 
@@ -53,15 +51,19 @@ impl PunchingClient {
 			base.emit_signal(sig, &[val]);
 		};
 		
-		if let Some((sig, val)) = self.joined_addr.poll() {
+		if let Some((sig, val)) = self.joined_dst.poll() {
 			
 			
-			let val = val.clone().map_or(Dictionary::new(), |v| {
-				let mut dict = Dictionary::new();
-				dict.set("ip", v.0);
-				dict.set("port", v.1);
-				dict
-			});
+			let val: Array<Dictionary> = val
+				.clone()
+				.iter()
+				.map(|addr| {
+					let mut dict = Dictionary::new();
+					dict.set("ip", addr.ip().to_string());
+					dict.set("port", addr.port());
+					dict
+				})
+				.collect();
 
 			base.emit_signal(sig, &[val.to_variant()]);
 		};
@@ -74,7 +76,7 @@ impl PunchingClient {
 	#[signal]
 	pub fn owned_listing_changed(new_owned_listing: Variant);
 	#[signal]
-	pub fn joined_addr_changed(new_joined_addr: Variant);
+	pub fn joined_addrs_changed(new_joined_addr: Variant);
 
 	#[func]
 	pub fn connect(&self, server_ip: String, server_port: u16, ip: String, port: u16) {
@@ -100,9 +102,10 @@ impl PunchingClient {
 		// spawn task //
 		let client = self.client.clone();
 		let connected_flag = self.connected.inner().clone();
+		let joined_dst = self.joined_dst.inner().clone();
 
 		spawn_local(async move {
-			let new_client = match Client::new(addr, server_addr).await {
+			let new_client = match Client::new(addr, server_addr, joined_dst).await {
 				Ok(c) => c,
 				Err(e) => {
 					godot_error!("Unable to make new client: {e}");
@@ -114,6 +117,26 @@ impl PunchingClient {
 			
 			let mut flag = connected_flag.write().await;
 			*flag = true;
+		});
+	}
+
+	#[func]
+	pub fn remove_joined(&self, index: u32) {
+		let index = match index.try_into() {
+			Ok(i) => i,
+			Err(e) => {
+				godot_error!("Unable to convert u32 to usize for indexing: {e}");
+				return;
+			}
+		};
+		let joined_dst = self.joined_dst.inner().clone();
+		spawn_local(async move {
+			let mut joined_dst = joined_dst.write().await;
+			if index >= joined_dst.len() {
+				godot_error!("Remove joined index out of bounds");
+				return;
+			}
+			joined_dst.remove(index);
 		});
 	}
 	

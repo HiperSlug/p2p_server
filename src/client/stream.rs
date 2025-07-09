@@ -4,7 +4,7 @@ use futures::StreamExt;
 use tokio::{sync::mpsc::Sender, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tonic::{Status, Streaming};
-use crate::proto::{client_status::Status as ClientStatusEnum, order::Order as OrderEnum, ClientStatus as ClientStatusStruct, Order as OrderStruct, Proxy, Punch, PunchStatus};
+use crate::{proto::{client_status::Status as ClientStatusEnum, order::Order as OrderEnum, ClientStatus as ClientStatusStruct, Order as OrderStruct, Proxy, Punch, PunchStatus}, ThreadSafe};
 use super::punch_nat;
 
 
@@ -12,14 +12,16 @@ pub struct StreamHandler {
 	status_stream: Sender<ClientStatusStruct>,
 	bind_addr: SocketAddr,
 	cancel: CancellationToken,
+	joined_dst: ThreadSafe<Vec<SocketAddr>>,
 }
 
 impl StreamHandler {
-	pub fn new(status_stream: Sender<ClientStatusStruct>, bind_addr: SocketAddr) -> Arc<Self> {
+	pub fn new(status_stream: Sender<ClientStatusStruct>, bind_addr: SocketAddr, joined_dst: ThreadSafe<Vec<SocketAddr>>) -> Arc<Self> {
 		Arc::new(Self {
 			status_stream,
 			bind_addr,
 			cancel: CancellationToken::new(),
+			joined_dst,
 		})
 	}
 
@@ -94,6 +96,9 @@ impl StreamHandler {
 				if let Err(e) = self.status_stream.send(msg).await {
 					eprintln!("Unable to send punch status: {e}");
 				};
+
+				let mut dst = self.joined_dst.write().await;
+				dst.push(target_addr);
 				Ok(())
 			},
 			Err(e) => {
