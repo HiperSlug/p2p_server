@@ -1,8 +1,10 @@
-use std::{net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use anyhow::Result;
+use hyper_util::rt::TokioExecutor;
 use tokio::{net::UdpSocket, sync::{mpsc::{self}, RwLock}, time::{sleep, timeout}};
 use tokio_stream::{wrappers::ReceiverStream};
-use tonic::{transport::{Channel, Endpoint}, Request};
+use tonic::Request;
+use tonic_web::GrpcWebClientLayer;
 use uuid::Uuid;
 use crate::{listing::{RustListing, RustListingNoId}, proto::{puncher_service_client::PuncherServiceClient, AddListingRequest, ClientStatus, CreateSessionRequest, EndSessionRequest, GetListingsRequest, JoinRequest, RemoveListingRequest}, ThreadSafe};
 
@@ -12,7 +14,7 @@ use stream::StreamHandler;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Client {
-	client: ThreadSafe<PuncherServiceClient<Channel>>,
+	client: ThreadSafe<WebClient>,
 	session_id: Uuid,
 	stream_handler: Arc<StreamHandler>,
 }
@@ -22,7 +24,7 @@ impl Client {
 
 	pub fn id(&self) -> Vec<u8> { self.session_id.clone().into_bytes().to_vec() }
 
-	pub fn inner(&self) -> &ThreadSafe<PuncherServiceClient<Channel>> { &self.client }
+	pub fn inner(&self) -> &ThreadSafe<WebClient> { &self.client }
 
 	pub fn cancel(&self) { self.stream_handler.stop() }
 
@@ -121,21 +123,27 @@ impl Client {
 	
 }
 
+type WebClient = PuncherServiceClient<tonic_web::GrpcWebClientService<hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, tonic_web::GrpcWebCall<tonic::body::Body>>>>;
+
 async fn create_threadsafe_client(
 	server_url: String,
 	port: u16,
-) -> Result<ThreadSafe<PuncherServiceClient<Channel>>> {
-	let url = format!("{server_url}:{port}");
+) -> Result<ThreadSafe<WebClient>> {
+	let url = format!("http://{server_url}:{port}");
 
-	let channel = Endpoint::from_str(&url)?
-		.connect()
-		.await?;
+	let client = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build_http();
 
-	Ok(Arc::new(RwLock::new(PuncherServiceClient::new(channel))))
+	let svc = tower::ServiceBuilder::new()
+		.layer(GrpcWebClientLayer::new())
+		.service(client);
+
+	let client  = PuncherServiceClient::with_origin(svc, url.try_into()?);
+
+	Ok(Arc::new(RwLock::new(client)))
 }
 
 async fn create_session(
-	client: ThreadSafe<PuncherServiceClient<Channel>>, 
+	client: ThreadSafe<WebClient>, 
 	addr: SocketAddr,
 ) -> Result<Uuid> {
 	let req = Request::new(CreateSessionRequest {
@@ -153,7 +161,7 @@ async fn create_session(
 }
 
 async fn start_session(
-	client: ThreadSafe<PuncherServiceClient<Channel>>, 
+	client: ThreadSafe<WebClient>, 
 	session_id: &Uuid,
 	addr: SocketAddr,
 	joined_dst: ThreadSafe<Vec<SocketAddr>>,
