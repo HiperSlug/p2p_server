@@ -171,6 +171,8 @@ impl PunchingClient {
 	
 	#[func]
 	pub fn disconnect(&self) {
+
+		
 		let client = self.client.clone();
 		let connected_flag = self.connected.inner().clone();
 		let error = self.errors.inner().clone();

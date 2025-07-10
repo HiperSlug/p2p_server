@@ -125,7 +125,7 @@ async fn create_threadsafe_client(
 	server_url: String,
 	port: u16,
 ) -> Result<ThreadSafe<PuncherServiceClient<Channel>>> {
-	let url = format!("https://{server_url}:{port}");
+	let url = format!("{server_url}:{port}");
 
 	let channel = Endpoint::from_str(&url)?
 		.connect()

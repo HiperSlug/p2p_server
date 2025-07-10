@@ -21,11 +21,7 @@ pub async fn run(addr: SocketAddr) -> anyhow::Result<()> {
 
 	Server::builder()
 		.accept_http1(true)
-		.layer(
-			ServiceBuilder::new()
-			.layer(GrpcWebLayer::new())
-			.layer(CorsLayer::new())
-		)
+		.layer(GrpcWebLayer::new())
 		.add_service(svc)
 		.serve(addr)
 		.await?;
