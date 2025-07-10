@@ -1,5 +1,6 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use anyhow::Result;
+use anyhow::{bail, Result};
+use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::rt::TokioExecutor;
 use tokio::{net::UdpSocket, sync::{mpsc::{self}, RwLock}, time::{sleep, timeout}};
 use tokio_stream::{wrappers::ReceiverStream};
@@ -35,7 +36,7 @@ impl Client {
 		joined_dst: ThreadSafe<Vec<SocketAddr>>,
 	) -> Result<Self> {
 		let client = create_threadsafe_client(server_url, server_port).await?;
-		
+		// bail!("part 1 success.");
 		let session_id = create_session(client.clone(), addr).await?;
 
 		let stream_handler = start_session(client.clone(), &session_id, addr, joined_dst).await?;
@@ -129,9 +130,15 @@ async fn create_threadsafe_client(
 	server_url: String,
 	port: u16,
 ) -> Result<ThreadSafe<WebClient>> {
-	let url = format!("http://{server_url}:{port}");
+	let url = format!("{server_url}:{port}");
 
-	let client = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build_http();
+	let https = HttpsConnectorBuilder::new()
+		.with_native_roots()?
+		.https_or_http()
+		.enable_http1()
+		.build();
+
+	let client = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
 
 	let svc = tower::ServiceBuilder::new()
 		.layer(GrpcWebClientLayer::new())
@@ -155,7 +162,7 @@ async fn create_session(
 	let response = timeout(TIMEOUT,
 		client.create_session(req)
 	).await??;
-
+	
 	let id = response.into_inner().session_id;
 	Ok(Uuid::from_slice(&id[..16])?)
 }
