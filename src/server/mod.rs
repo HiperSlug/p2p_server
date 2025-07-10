@@ -19,6 +19,7 @@ pub async fn run(addr: SocketAddr) -> anyhow::Result<()> {
 
 	let svc = PuncherServiceServer::new(server);
 	Server::builder()
+		.accept_http1(true)
 		.layer(GrpcWebLayer::new())
 		.add_service(svc)
 		.serve(addr)
