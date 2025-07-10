@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use anyhow::{bail, Result};
-use hyper_rustls::HttpsConnectorBuilder;
-use hyper_util::rt::TokioExecutor;
+use anyhow::Result;
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use hyper_util::{client::legacy::connect::HttpConnector, rt::TokioExecutor};
 use tokio::{net::UdpSocket, sync::{mpsc::{self}, RwLock}, time::{sleep, timeout}};
 use tokio_stream::{wrappers::ReceiverStream};
 use tonic::Request;
@@ -124,7 +124,7 @@ impl Client {
 	
 }
 
-type WebClient = PuncherServiceClient<tonic_web::GrpcWebClientService<hyper_util::client::legacy::Client<hyper_util::client::legacy::connect::HttpConnector, tonic_web::GrpcWebCall<tonic::body::Body>>>>;
+type WebClient = PuncherServiceClient<tonic_web::GrpcWebClientService<hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, tonic_web::GrpcWebCall<tonic::body::Body>>>>;
 
 async fn create_threadsafe_client(
 	server_url: String,
@@ -144,7 +144,7 @@ async fn create_threadsafe_client(
 		.layer(GrpcWebClientLayer::new())
 		.service(client);
 
-	let client  = PuncherServiceClient::with_origin(svc, url.try_into()?);
+	let client: PuncherServiceClient<tonic_web::GrpcWebClientService<hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, tonic_web::GrpcWebCall<tonic::body::Body>>>>  = PuncherServiceClient::with_origin(svc, url.try_into()?);
 
 	Ok(Arc::new(RwLock::new(client)))
 }
