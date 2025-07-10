@@ -1,8 +1,8 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 use anyhow::Result;
 use tokio::{net::UdpSocket, sync::{mpsc::{self}, RwLock}, time::{sleep, timeout}};
 use tokio_stream::{wrappers::ReceiverStream};
-use tonic::{transport::Channel, Request};
+use tonic::{transport::{Channel, Endpoint}, Request};
 use uuid::Uuid;
 use crate::{listing::{RustListing, RustListingNoId}, proto::{puncher_service_client::PuncherServiceClient, AddListingRequest, ClientStatus, CreateSessionRequest, EndSessionRequest, GetListingsRequest, JoinRequest, RemoveListingRequest}, ThreadSafe};
 
@@ -125,8 +125,11 @@ async fn create_threadsafe_client(
 	server_url: String,
 	port: u16,
 ) -> Result<ThreadSafe<PuncherServiceClient<Channel>>> {
-	let uri = format!("{server_url}:{port}").parse()?;
-	let channel = Channel::builder(uri).connect().await?;
+	let url = format!("https://{server_url}:{port}");
+
+	let channel = Endpoint::from_str(&url)?
+		.connect()
+		.await?;
 
 	Ok(Arc::new(RwLock::new(PuncherServiceClient::new(channel))))
 }

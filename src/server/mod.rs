@@ -4,6 +4,9 @@ use rand::random;
 use tokio::{join, sync::{mpsc, oneshot, RwLock}, time::timeout};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming, transport::Server};
+use tonic_web::GrpcWebLayer;
+use tower::ServiceBuilder;
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 use futures::{future::join_all, Stream, StreamExt};
 use crate::{listing::RustListing, proto::{client_status::Status as ClientStatusEnum, order::Order as OrderEnum, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, ClientStatus, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, GetListingsRequest, GetListingsResponse, JoinRequest, JoinResponse, Order as OrderMessage, Punch, PunchStatus, RemoveListingRequest, RemoveListingResponse}};
@@ -14,8 +17,16 @@ use session::{Session, SessionRef};
 pub async fn run(addr: SocketAddr) -> anyhow::Result<()> {
 	let server = PuncherServer::default();
 
+	let svc = PuncherServiceServer::new(server);
+
 	Server::builder()
-		.add_service(PuncherServiceServer::new(server))
+		.accept_http1(true)
+		.layer(
+			ServiceBuilder::new()
+			.layer(GrpcWebLayer::new())
+			.layer(CorsLayer::new())
+		)
+		.add_service(svc)
 		.serve(addr)
 		.await?;
 	
@@ -25,8 +36,16 @@ pub async fn run(addr: SocketAddr) -> anyhow::Result<()> {
 pub async fn run_signal(addr: SocketAddr, ready_tx: oneshot::Sender<()>) -> anyhow::Result<()> {
 	let server = PuncherServer::default();
 
+	let svc = PuncherServiceServer::new(server);
+
 	let svc = Server::builder()
-		.add_service(PuncherServiceServer::new(server));
+		.accept_http1(true)
+		.layer(
+			ServiceBuilder::new()
+			.layer(GrpcWebLayer::new())
+			.layer(CorsLayer::new())
+		)
+		.add_service(svc);
 	
 	let fut =	svc.serve(addr);
 
