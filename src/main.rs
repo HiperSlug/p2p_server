@@ -1,7 +1,9 @@
+use std::net::{Ipv4Addr, SocketAddrV4};
+
 use nat_puncher::server;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    server::run("0.0.0.0:3000".parse().unwrap()).await?;
-	Ok(())
+	let addr = std::net::SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3000));
+    server::run(addr).await
 }

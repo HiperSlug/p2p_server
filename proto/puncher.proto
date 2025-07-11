@@ -7,9 +7,7 @@ service PuncherService {
 	rpc RemoveListing (RemoveListingRequest) returns (RemoveListingResponse);
 	rpc GetListings (GetListingsRequest) returns (GetListingsResponse);
 	
-	rpc CreateSession (CreateSessionRequest) returns (CreateSessionResponse);
-	rpc StreamSession (stream ClientStatus) returns (stream Order);
-	rpc EndSession (EndSessionRequest) returns (EndSessionResponse);
+	rpc StreamSession (stream ClientStreamMessage) returns (stream ServerStreamMessage);
 
 	rpc Join (JoinRequest) returns (JoinResponse);
 }
@@ -54,24 +52,11 @@ message GetListingsResponse {
 	repeated Listing listings = 1;
 }
 
-
-// -- CreateSession --
-message CreateSessionRequest {
-	string ip = 1;
-	uint32 port = 2;
-}
-
-message CreateSessionResponse {
-	bytes session_id = 1;
-}
-
-
 // -- StreamSession -- 
 
-// Status
-message ClientStatus { // empty status used as a keep_alive message
-	optional bytes session_id = 1; // required in first status
-	oneof status {
+// Client
+message ClientStreamMessage { // empty as keepalive
+	oneof client_stream_enum {
 		PunchStatus punch_status = 3;
 	}
 }
@@ -81,11 +66,11 @@ message PunchStatus {
 	bool success = 2;
 }
 
-// Order
-message Order {
-	oneof order {
+// Server
+message ServerStreamMessage {
+	optional bytes session_id_assignment = 3;
+	oneof server_stream_enum {
 		Punch punch = 1;
-		Proxy proxy = 2;
 	}
 }
 
@@ -93,19 +78,6 @@ message Punch {
 	string ip = 1;
 	uint32 port = 2;
 }
-
-message Proxy {
-	string ip = 1;
-	uint32 port = 2;
-}
-
-// -- EndSession --
-message EndSessionRequest {
-	bytes session_id = 1;
-}
-
-message EndSessionResponse {}
-
 
 // -- Join --
 message JoinRequest {

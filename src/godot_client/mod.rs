@@ -5,7 +5,7 @@ use crate::{client::Client, listing::{GodotListing, GodotListingNoId, RustListin
 
 mod asyncvalue;
 use asyncvalue::AsyncValue;
-
+mod listing;
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
@@ -127,7 +127,7 @@ impl PunchingClient {
 		
 		
 		let fut = async move {
-			let new_client = match Client::new(addr, server_url, server_port, joined_dst).await {
+			let new_client = match Client::new(server_url.parse().unwrap()).await {
 				Ok(c) => c,
 				Err(e) => {
 					let mut err = error.write().await;

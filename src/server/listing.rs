@@ -1,4 +1,3 @@
-use godot::prelude::*;
 use anyhow::{anyhow, Error, Result};
 use uuid::Uuid;
 use crate::proto::{Listing as TonicListing, ListingNoId as TonicListingNoId};
@@ -56,13 +55,6 @@ impl From<TonicListingNoId> for RustListingNoId {
 	}
 }
 
-impl From<GodotListingNoId> for RustListingNoId {
-	fn from(gd_listing_no_id: GodotListingNoId) -> Self {
-		Self {
-			name: gd_listing_no_id.name.into(),
-		}
-	}
-}
 
 
 // ---- TONIC ---- //
@@ -83,65 +75,6 @@ impl From<RustListingNoId> for TonicListingNoId {
 	fn from(listing_no_id: RustListingNoId) -> Self {
 		Self {
 			name: listing_no_id.name,
-		}
-	}
-}
-
-
-// ---- GODOT ---- //
-
-// GODOT Listing //
-#[derive(GodotClass)]
-#[class(base=RefCounted)]
-#[allow(dead_code)]
-pub struct GodotListing {
-	#[var]
-	id: GString,
-	#[var]
-	listing_no_id: Gd<GodotListingNoId>,
-}
-
-#[godot_api]
-impl IRefCounted for GodotListing {
-	fn init(_: Base<RefCounted>) -> Self { 
-		Self {
-			id: Uuid::new_v4().to_string().into(),
-			listing_no_id: Gd::from_init_fn(|b|GodotListingNoId::init(b)),
-		}
-	}
-}
-
-impl From<RustListing> for GodotListing {
-	fn from(listing: RustListing) -> Self {
-		Self {
-			id: listing.id().to_string().into(),
-			listing_no_id: Gd::from_object(listing.into_inner().into()),
-		}
-	}
-}
-
-
-// GODOT ListingNoId //
-#[derive(GodotClass, Clone)]
-#[class(base=RefCounted)]
-pub struct GodotListingNoId {
-	#[var]
-	pub name: GString,
-}
-
-#[godot_api]
-impl IRefCounted for GodotListingNoId   {
-	fn init(_: Base<RefCounted>) -> Self { 
-		Self {
-			name: String::new().into(),
-		}
-	}
-}
-
-impl From<RustListingNoId> for GodotListingNoId {
-	fn from(listing_no_id: RustListingNoId) -> Self {
-		Self {
-			name: listing_no_id.name.into(),
 		}
 	}
 }

@@ -1,18 +1,17 @@
-use std::{collections::HashMap, net::{SocketAddr, SocketAddrV4}, pin, sync::Arc, time::Duration};
-use anyhow::{anyhow, bail, Result};
-use rand::random;
-use tokio::{join, sync::{mpsc, oneshot, RwLock}, time::timeout};
+use std::{collections::HashMap, net::SocketAddr, pin, sync::Arc};
+use anyhow::{anyhow, Result};
+use tokio::{join, sync::{mpsc::{self, Sender}, RwLock}, time::timeout};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming, transport::Server};
 use tonic_web::GrpcWebLayer;
-use tower::ServiceBuilder;
-use tower_http::cors::CorsLayer;
 use uuid::Uuid;
-use futures::{future::join_all, Stream, StreamExt};
-use crate::{listing::RustListing, proto::{client_status::Status as ClientStatusEnum, order::Order as OrderEnum, puncher_service_server::{PuncherService, PuncherServiceServer}, AddListingRequest, AddListingResponse, ClientStatus, CreateSessionRequest, CreateSessionResponse, EndSessionRequest, EndSessionResponse, GetListingsRequest, GetListingsResponse, JoinRequest, JoinResponse, Order as OrderMessage, Punch, PunchStatus, RemoveListingRequest, RemoveListingResponse}};
+use futures::Stream;
+use crate::{proto::{client_stream_message::ClientStreamEnum, puncher_service_server::{PuncherService, PuncherServiceServer}, server_stream_message::ServerStreamEnum, AddListingRequest, AddListingResponse, ClientStreamMessage, GetListingsRequest, GetListingsResponse, JoinRequest, JoinResponse, Punch, PunchStatus, RemoveListingRequest, RemoveListingResponse, ServerStreamMessage}, TIMEOUT};
 
 pub mod session;
 use session::{Session, SessionRef};
+pub mod listing;
+use listing::RustListing;
 
 pub async fn run(addr: SocketAddr) -> anyhow::Result<()> {
 	let server = PuncherServer::default();
@@ -24,28 +23,6 @@ pub async fn run(addr: SocketAddr) -> anyhow::Result<()> {
 		.add_service(svc)
 		.serve(addr)
 		.await?;
-	
-	Ok(())
-}
-
-pub async fn run_signal(addr: SocketAddr, ready_tx: oneshot::Sender<()>) -> anyhow::Result<()> {
-	let server = PuncherServer::default();
-
-	let svc = PuncherServiceServer::new(server);
-
-	let svc = Server::builder()
-		.accept_http1(true)
-		.layer(
-			ServiceBuilder::new()
-			.layer(GrpcWebLayer::new())
-			.layer(CorsLayer::new())
-		)
-		.add_service(svc);
-	
-	let fut =	svc.serve(addr);
-
-	let _ = ready_tx.send(());
-	fut.await?;
 	
 	Ok(())
 }
@@ -62,72 +39,25 @@ impl PuncherServer {
 		sessions.get(session_id).map(|s| s.clone())
 	}
 
-	async fn validate(&self, session_id: &Uuid) -> Result<SessionRef> {
-		let session = self
-			.get(session_id)
-			.await
-			.ok_or(anyhow!("Not found."))?;
+	fn cleanup_fut(&self, session_id: &Uuid)  -> impl Future<Output = ()> + Send + 'static {
+		let sessions = self.sessions.clone();
+		let id_map = self.id_map.clone();
+		let session_id = session_id.clone();
 
-		{
-			let session = session.read().await;
+		async move {
+			let mut sessions = sessions.write().await;
+
+			let Some(session) = sessions.remove(&session_id) else {
+				eprintln!("When trying to remove session it didnt exist.");
+				return;
+			};
 			
-			if !session.is_valid() {
-				self.remove_deep(&[*session_id]).await;
-				
-				bail!("Expired.")
-			}
-		}
-		
-		Ok(session)
-	}
-
-	async fn remove_deep(&self, session_ids: &[Uuid]) {
-		let mut sessions = self.sessions.write().await;
-
-		let removed_sessions = session_ids
-			.iter()
-			.filter_map(|id| sessions.remove(id))
-			.collect::<Vec<SessionRef>>();
-		
-		let mut id_map = self.id_map.write().await;
-		for session in removed_sessions {
-			let session = session.write().await;
+			let session = session.lock().await;
 
 			if let Some(listing) = session.listing.as_ref() {
+				let mut id_map = id_map.write().await;
 				id_map.remove(listing.id());
 			}
-		}
-	}
-
-	async fn remove_timed_out(&self) {
-		let expired = {
-			let sessions = self.sessions.read().await;
-			let mut expired = Vec::new();
-			for s in sessions.values().cloned() {
-				expired.push(async move {
-					let session = s.read().await;
-					if session.is_timed_out() {
-						Some(session.id().clone())
-					} else {
-						None
-					}
-				})
-			}
-			expired
-		};
-		
-		let e: Vec<Uuid> = join_all(expired)
-			.await
-			.into_iter()
-			.flatten()
-			.collect();
-
-		self.remove_deep(&e).await;
-	}
-
-	pub async fn remove_timed_out_chance(&self) {
-		if random::<f32>() < 0.025 {
-			self.remove_timed_out().await;
 		}
 	}
 }
@@ -135,15 +65,13 @@ impl PuncherServer {
 
 #[tonic::async_trait]
 impl PuncherService for PuncherServer {
-	type StreamSessionStream = pin::Pin<Box<dyn Stream<Item = Result<OrderMessage, Status>> + Send + Sync + 'static>>;
+	type StreamSessionStream = pin::Pin<Box<dyn Stream<Item = Result<ServerStreamMessage, Status>> + Send + Sync + 'static>>;
 
-	// -- listings -- //
 	async fn add_listing( // ADD LISTING //
         &self,
         request: Request<AddListingRequest>,
     ) -> Result<Response<AddListingResponse>, Status> {
-		println!("Add listing req");
-		self.remove_timed_out_chance().await;
+		println!("Add listing req: {}", Uuid::from_slice(&request.get_ref().session_id).unwrap_or(Uuid::max()));
 
 		let request = request.into_inner();
 		
@@ -154,14 +82,14 @@ impl PuncherService for PuncherServer {
 			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
 
 		let session = self
-			.validate(&session_id)
+			.get(&session_id)
 			.await
-			.map_err(|e| Status::invalid_argument(format!("Invalid session_id: {e}")))?;
+			.ok_or(Status::invalid_argument(format!("Invalid session_id")))?;
 		
 
 		// validate assignment //
 		{
-			let session = session.read().await;
+			let session = session.lock().await;
 			if session.listing.is_some() {
 				return Err(Status::already_exists("This session already has an associated listing."))
 			}
@@ -181,7 +109,7 @@ impl PuncherService for PuncherServer {
 
 		let listing_id = listing.id().as_bytes().to_vec();
 
-		let mut session = session.write().await;
+		let mut session = session.lock().await;
 		session.listing = Some(listing);
 
 
@@ -192,21 +120,20 @@ impl PuncherService for PuncherServer {
         &self,
         request: Request<RemoveListingRequest>,
     ) -> Result<Response<RemoveListingResponse>, Status> {
-		println!("Remove listing req");
-		self.remove_timed_out_chance().await;
+		println!("Remove listing req: {}", Uuid::from_slice(&request.get_ref().session_id).unwrap_or(Uuid::max()));
 		
 		// validate session //
 		let session_id = request.into_inner().session_id.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
 
 		let session = self
-			.validate(&session_id)
+			.get(&session_id)
 			.await
-			.map_err(|e| Status::invalid_argument(format!("Invalid session_id: {e}")))?;
+			.ok_or(Status::invalid_argument(format!("Invalid session_id")))?;
 
 		
 		// assignment //
-		let mut session = session.write().await;
+		let mut session = session.lock().await;
 
 		if let Some(listing) = session.listing.as_ref() {
 			let mut id_map = self.id_map.write().await;
@@ -224,13 +151,10 @@ impl PuncherService for PuncherServer {
     ) -> Result<Response<GetListingsResponse>, Status> {
 		println!("Get listing req");
 
-		self.remove_timed_out_chance().await;
-
-
         let sessions = self.sessions.read().await;
 		let mut listings = Vec::new();
 		for (_, session) in sessions.iter() {
-			let session = session.read().await;
+			let session = session.lock().await;
 			if let Some(listing) = session.listing.as_ref() {
 				listings.push(listing.clone().into());
 			}
@@ -239,137 +163,63 @@ impl PuncherService for PuncherServer {
 		Ok(Response::new(GetListingsResponse { listings }))
     }
 
-	// -- connection -- //
-	async fn create_session( // CREATE SESSION //
+	async fn stream_session( // STREAM //
 		&self,
-		request: Request<CreateSessionRequest>,
-	) -> Result<Response<CreateSessionResponse>, Status> {
-		println!("Create session req");
-		
-		self.remove_timed_out_chance().await;
+		request: Request<Streaming<ClientStreamMessage>>,
+	) -> Result<Response<Self::StreamSessionStream>, Status> {
+		let session_id = Uuid::new_v4();
 
-		let request = request.into_inner();
+		println!("Stream session req: {session_id}");
 
+		let addr = match request.remote_addr()  {
+			Some(a) => Ok(a),
+			None => {
+				eprintln!("Unable to establish connection with client because remote_addr() returned none.");
+				Err(Status::internal("Couldnt get client remote_addr"))
+			}
+		}?;
 
-		// parse addr //
-		let ip = request
-			.ip
-			.parse()
-			.map_err(|e| Status::invalid_argument(format!("Invalid ip: {e}")))?;
-		let port = request
-			.port
-			.try_into()
-			.map_err(|e| Status::invalid_argument(format!("Invalid port: {e}")) )?;
-		let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
+		let streaming_rx = request.into_inner();
+		let (client_tx, client_rx) = mpsc::channel(32);
 
+		let (server_tx, server_rx) = mpsc::channel(32);
 
-		// create session //
-		let session = Session::new_ref(addr);
-		
-		let session_id = {
-			let session = session.read().await;
-			session.id().clone()
-		};
+		let session = Session::new_ref(addr, server_tx, client_rx);
 
-		let session_id_bytes = session_id.as_bytes().to_vec();
+		let cleanup = self.cleanup_fut(&session_id);
+
+		tokio::spawn(handle_stream(
+			streaming_rx, 
+			client_tx, 
+			cleanup,
+		));
 
 		let mut sessions = self.sessions.write().await;
 		sessions.insert(session_id, session);
-		
-		Ok(Response::new(CreateSessionResponse { session_id: session_id_bytes }))
+
+		let out_stream = Box::pin(ReceiverStream::new(server_rx)) as Self::StreamSessionStream;
+		Ok(Response::new(out_stream))
 	}
 
-	async fn stream_session(
-		&self,
-		request: Request<Streaming<ClientStatus>>,
-	) -> Result<Response<Self::StreamSessionStream>, Status> {
-		println!("Stream session req");
-
-		let mut request = request.into_inner();
-
-		let session_id = timeout(Duration::from_secs(5), request.message())
-			.await
-			.map_err(|e| Status::invalid_argument(format!("First ping timeout: {e}")))??
-			.ok_or(Status::invalid_argument("Stream Closed."))?
-			.session_id
-			.ok_or(Status::invalid_argument("No session_id in first ping."))?
-			.try_into()
-			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
-		
-		let session = self
-			.get(&session_id)
-			.await
-			.ok_or(Status::invalid_argument("Session ID points to nothing."))?;
-
-		let (order_tx, order_rx) = mpsc::channel(32);
-
-		let (status_tx, status_rx) = mpsc::channel(8);
-		
-		// handle ping then forward status to status rx
-		let s = session.clone();
-		tokio::spawn(async move {
-			while let Some(msg) = request.next().await {
-				if let Ok(status) = msg {
-					if let Some(status) = status.status {
-						if let Err(e) = status_tx.send(status).await {
-							eprintln!("Couldnt forward status: {e}");
-							break;
-						};
-					}
-
-					let mut session = s.write().await;
-					session.see();
-				} else {
-					break;
-				}
-			}
-		});
-
-		let mut session = session.write().await;
-		session.streams = Some((order_tx, status_rx));
-
-		let stream = Box::pin(ReceiverStream::new(order_rx)) as Self::StreamSessionStream;
-		Ok(Response::new(stream))
-	}
-
-	async fn end_session(
-		&self,
-		request: Request<EndSessionRequest>,
-	) -> Result<Response<EndSessionResponse>, Status> {
-		println!("End session req");
-
-		self.remove_timed_out_chance().await;
-
-		let session_id = request
-			.into_inner()
-			.session_id
-			.try_into()
-			.map_err(|e| Status::invalid_argument(format!("Invalid Uuid: {e}")))?;
-
-		self.remove_deep(&[session_id]).await;
-
-		Ok(Response::new(EndSessionResponse {}))
-	}
-
-	async fn join(
+	async fn join( // JOIN //
 		&self,
 		request: Request<JoinRequest>
 	) -> Result<Response<JoinResponse>, Status> {
-		println!("Join session req");
+		println!("Join session req: {}, {}", Uuid::from_slice(&request.get_ref().session_id).unwrap_or(Uuid::max()), Uuid::from_slice(&request.get_ref().target_listing_id).unwrap_or(Uuid::max()));
 
 		let request = request.into_inner();
 
 		// validate session //
-		let session_id = request.session_id.try_into()
+		let session_id: Uuid = request.session_id.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid session Uuid: {e}")))?;
 
 		let session = self
-			.validate(&session_id)
+			.get(&session_id)
 			.await
-			.map_err(|e| Status::invalid_argument(format!("Invalid session id: {e}")))?;
+			.ok_or(Status::invalid_argument(format!("Invalid session id")))?;
 
 		// validate target session //
-		let target_listing_id = request
+		let target_listing_id: Uuid = request
 			.target_listing_id
 			.try_into()
 			.map_err(|e| Status::invalid_argument(format!("Invalid listing Uuid: {e}")))?;
@@ -380,19 +230,18 @@ impl PuncherService for PuncherServer {
 			.ok_or(Status::invalid_argument("Listing ID has no associated session."))?;
 
 		let target_session = self
-			.validate(&target_session_id)
+			.get(&target_session_id)
 			.await
-			.map_err(|e| Status::invalid_argument(format!("Invalid session id: {e}")))?;
+			.ok_or(Status::invalid_argument(format!("Invalid session id")))?;
 
 		// send both clients punch orders //
-
 		let target_addr = {
-			let target_session = target_session.write().await;
+			let target_session = target_session.lock().await;
 			target_session.addr().clone()
 		};
 
 		let addr = {
-			let session = session.write().await;
+			let session = session.lock().await;
 			session.addr().clone()
 		};
 
@@ -427,25 +276,64 @@ impl PuncherService for PuncherServer {
 			}
 		}
 
-		// TODO handle Proxy fallback		
+		// TODO handle Proxy fallback
 
 		Ok(Response::new(JoinResponse { }))
 	}
 }
 
 async fn order_punch(session: SessionRef, addr: SocketAddr) -> Result<PunchStatus> {
-	let mut session = session.write().await;
-	let (tx, rx) = session.streams.as_mut().ok_or(anyhow!("No stream found on a validated session."))?;
+	let mut session = session.lock().await;
+	let (tx, rx) = session.streams();
 
-	let order = Ok(OrderMessage {
-		order: Some(OrderEnum::Punch(Punch {
+	let punch_order = Ok(ServerStreamMessage {
+		session_id_assignment: None,
+		server_stream_enum: Some(ServerStreamEnum::Punch(Punch {
 			ip: addr.ip().to_string(),
 			port: addr.port().into(),
 		})),
 	});
 
-	tx.send(order).await.map_err(|e| anyhow!("Unable to send order: {e}"))?;
-	let ClientStatusEnum::PunchStatus(s) = timeout(Duration::from_secs(5), rx.recv()).await?.ok_or(anyhow!("Channel closed."))? /* else { bail!("Incorrect status type received.") } */;
+	timeout(TIMEOUT, tx.send(punch_order))
+		.await
+		.map_err(|e| anyhow!("Timeout sending punch order: {e}"))?
+		.map_err(|e| anyhow!("Unable to send order: {e}"))?;
 
-	Ok(s)
+	let ClientStreamEnum::PunchStatus(status) = timeout(TIMEOUT, rx.recv())
+		.await?
+		.ok_or(anyhow!("Stream closed when receiving punch status"))?;
+
+	Ok(status)
+}
+
+
+async fn handle_stream<Fut>(
+	mut stream: Streaming<ClientStreamMessage>, 
+	output: Sender<ClientStreamEnum>, 
+	cleanup: Fut,
+) 
+where 
+	Fut: Future<Output = ()> + Send + 'static,
+{
+	loop {
+		match stream.message().await {
+			Ok(opt) => {
+				match opt {
+					Some(msg) => {
+						if let Some(msg_enum) = msg.client_stream_enum {
+							if let Err(e) = output.send(msg_enum).await {
+								eprintln!("Unable to forward streaming message: {e}; closing stream handler");
+								break;
+							};
+						};
+					},
+					None => break,
+				}
+			},
+			Err(e) => {
+				eprintln!("Received stream error: {e}; continuing");
+			},
+		};
+	}
+	cleanup.await;
 }

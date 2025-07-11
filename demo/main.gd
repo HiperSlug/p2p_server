@@ -10,8 +10,8 @@ func _ready() -> void:
 	
 	addr = await Stun.pub_addr().recv
 	print(addr)
-	#client.connect("127.0.0.1", 3000, addr.ip, addr.port) # connects to a locally hosted server
-	client.connect("https://p2p-server-s5wb.onrender.com", 443, addr.ip, addr.port) # fails to connect to renders server
+	client.connect("http://127.0.0.1", 3000, addr.ip, addr.port) # connects to a locally hosted server
+	#client.connect("https://p2p-server-s5wb.onrender.com", 443, addr.ip, addr.port) # fails to connect to renders server
 	print(await client.connection_changed)
 
 func signals():

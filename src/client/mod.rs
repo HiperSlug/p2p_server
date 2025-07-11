@@ -1,200 +1,197 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
-use hyper_util::{client::legacy::connect::HttpConnector, rt::TokioExecutor};
-use tokio::{net::UdpSocket, sync::{mpsc::{self}, RwLock}, time::{sleep, timeout}};
-use tokio_stream::{wrappers::ReceiverStream};
-use tonic::Request;
-use tonic_web::GrpcWebClientLayer;
+use hyper_util::{client::legacy::{self, connect::HttpConnector}, rt::TokioExecutor};
+use tokio::{net::UdpSocket, sync::{broadcast, mpsc, RwLock}, time::{sleep, timeout}};
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{body::Body, transport::Uri, Request};
+use tonic_web::{GrpcWebCall, GrpcWebClientLayer, GrpcWebClientService};
 use uuid::Uuid;
-use crate::{listing::{RustListing, RustListingNoId}, proto::{puncher_service_client::PuncherServiceClient, AddListingRequest, ClientStatus, CreateSessionRequest, EndSessionRequest, GetListingsRequest, JoinRequest, RemoveListingRequest}, ThreadSafe};
+use crate::{proto::{puncher_service_client::PuncherServiceClient, AddListingRequest, GetListingsRequest, JoinRequest, RemoveListingRequest}, server::listing::{RustListing, RustListingNoId}, ThreadSafe, TIMEOUT};
 
-mod stream;
-use stream::StreamHandler;
+mod session;
+use session::Session;
 
-const TIMEOUT: Duration = Duration::from_secs(5);
+type WebClient = PuncherServiceClient<GrpcWebClientService<legacy::Client<HttpsConnector<HttpConnector>, GrpcWebCall<Body>>>>;
 
 pub struct Client {
 	client: ThreadSafe<WebClient>,
-	session_id: Uuid,
-	stream_handler: Arc<StreamHandler>,
+	session: Option<Session>,
 }
 
 impl Client {
-	pub fn uuid(&self) -> &Uuid { &self.session_id }
-
-	pub fn id(&self) -> Vec<u8> { self.session_id.clone().into_bytes().to_vec() }
-
 	pub fn inner(&self) -> &ThreadSafe<WebClient> { &self.client }
 
-	pub fn cancel(&self) { self.stream_handler.stop() }
+	pub fn session(&self) -> &Option<Session> { &self.session }
 
-	pub async fn new(
-		addr: SocketAddr, 
-		server_url: String,
-		server_port: u16,
-		joined_dst: ThreadSafe<Vec<SocketAddr>>,
-	) -> Result<Self> {
-		let client = create_threadsafe_client(server_url, server_port).await?;
-		// bail!("part 1 success.");
-		let session_id = create_session(client.clone(), addr).await?;
+	pub fn end_session(&mut self) {	
+		if let Some(s) = self.session.take() {
+			s.end();
+		}
+	}
 
-		let stream_handler = start_session(client.clone(), &session_id, addr, joined_dst).await?;
-		
+	pub async fn new(server_url: Uri) -> Result<Self> {
+		let https = HttpsConnectorBuilder::new()
+			.with_native_roots()
+			.map_err(|e| anyhow!("With native roots error: {e}"))?
+			.https_or_http()
+			.enable_http1()
+			.build();
+
+		let client = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
+
+		let svc = tower::ServiceBuilder::new()
+			.layer(GrpcWebClientLayer::new())
+			.service(client);
+
+		let client = PuncherServiceClient::with_origin(svc, server_url);
+		let client = Arc::new(RwLock::new(client));
+
 		Ok(Self {
 			client,
-			session_id,
-			stream_handler,
+			session: None,
 		})
 	}
 
-	pub async fn end(self) {
-		let session_id = self.id();
-		let _ = timeout(TIMEOUT,
-			async {
-				let mut client = self.inner().write().await;
-				client.end_session(Request::new(EndSessionRequest {session_id})).await
-			}
-		).await;
-		self.cancel();
+	pub async fn start_session(&mut self) -> Result<broadcast::Receiver<SocketAddr>> {
+		let (client_tx, client_rx) = mpsc::channel(8);
+
+		let req = Request::new(ReceiverStream::new(client_rx));
+
+		let resp = {
+			let mut client = self.inner().write().await;
+			client.stream_session(req).await
+				.map_err(|e| anyhow!("Stream session status: {e}"))?
+		};
+
+		let mut server_rx = resp.into_inner();
+
+		let session_id: Uuid = timeout(TIMEOUT, server_rx.message()).await
+			.map_err(|e| anyhow!("Timeout waiting for session_id: {e}"))?
+			.map_err(|e| anyhow!("Received grpc error waiting for session_id: {e}"))?
+			.ok_or(anyhow!("First received message had no contents"))?
+			.session_id_assignment
+			.ok_or(anyhow!("First received message had no session_id"))?
+			.try_into()
+			.map_err(|e| anyhow!("Unable to convert received Vec<u8> to Uuid: {e}"))?;
+
+		let (session, joined_dst) = Session::start(session_id, server_rx, client_tx)
+			.await
+			.map_err(|e| anyhow!("Session creation error: {e}"))?;
+
+		self.session = Some(session);
+
+		Ok(joined_dst)
 	}
 
 	pub async fn create_listing(&mut self, listing: RustListingNoId) -> Result<Uuid> {
-		let session_id = self.id();
+		let session_id = self
+			.session()
+			.as_ref()
+			.ok_or(anyhow!("Cannot create listing without a session"))?
+			.id();
 		
-		let resp = timeout(TIMEOUT,
-			async {
-				let req = Request::new( AddListingRequest { 
-					listing: Some(listing.into()), 
-					session_id,
-				});
+		let req = Request::new( AddListingRequest { 
+			listing: Some(listing.into()), 
+			session_id,
+		});
 
-				let mut client = self.inner().write().await;
-				client.add_listing(req).await
-			}
-		).await??;
+		let fut = async {
+			let mut client = self.inner().write().await;
+			client.add_listing(req).await
+		};
 
-		let id = resp.into_inner().listing_id;
-		Ok(Uuid::from_slice(&id[..16])?)
+		let resp = timeout(TIMEOUT, fut)
+			.await
+			.map_err(|e| anyhow!("Add listing timeout: {e}"))?
+			.map_err(|e| anyhow!("Add listing error status: {e}"))?;
+
+		let listing_id: Uuid = resp
+			.into_inner()
+			.listing_id
+			.try_into()
+			.map_err(|e| anyhow!("Received bad listing_id from server: {e}"))?;
+
+		Ok(listing_id)
 	}
 
 	pub async fn remove_listing(&mut self) -> Result<()> {
-		let session_id = self.id();
-		timeout(TIMEOUT,
-			async {
-				let mut client = self.inner().write().await;
-				client.remove_listing(Request::new(RemoveListingRequest { session_id })).await
-			}
-		).await??;
+		let session_id = self
+			.session()
+			.as_ref()
+			.ok_or(anyhow!("Cannot remove listing without a session"))?
+			.id();
 		
+		let req = Request::new( RemoveListingRequest { 
+			session_id,
+		});
+
+		let fut = async {
+			let mut client = self.inner().write().await;
+			client.remove_listing(req).await
+		};
+
+		timeout(TIMEOUT, fut)
+			.await
+			.map_err(|e| anyhow!("Remove listing timeout: {e}"))?
+			.map_err(|e| anyhow!("Remove listing error status: {e}"))?;
+
 		Ok(())
 	}
 
 	pub async fn get_listings(&mut self) -> Result<Vec<RustListing>> {
-		let resp = timeout(TIMEOUT,
-			async {
-				let mut client = self.inner().write().await;
-				client.get_listings(Request::new( GetListingsRequest {})).await
-			}
-		).await??;
+		let req = Request::new( GetListingsRequest { });
 
-		Ok(resp
+		let fut = async {
+			let mut client = self.inner().write().await;
+			client.get_listings(req).await
+		};
+
+		let resp = timeout(TIMEOUT, fut)
+			.await
+			.map_err(|e| anyhow!("Get listings timeout: {e}"))?
+			.map_err(|e| anyhow!("Get listings error status: {e}"))?;
+
+		let listings: Vec<RustListing> = resp
 			.into_inner()
 			.listings
 			.into_iter()
-			.filter_map(|l| RustListing::try_from(l).ok())
-			.collect())
+			.filter_map(|l| l.try_into().ok())
+			.collect();
+
+		Ok(listings)
 	}
 
 	pub async fn join(&mut self, listing_id: Uuid) -> Result<()> {
-		let req = Request::new(JoinRequest {
-			session_id: self.id(),
-			target_listing_id: listing_id.as_bytes().to_vec(),
+		let session_id = self
+			.session()
+			.as_ref()
+			.ok_or(anyhow!("Cannot join listing without a session"))?
+			.id();
+		
+		let req = Request::new( JoinRequest { 
+			session_id,
+			target_listing_id: listing_id.into_bytes().to_vec(),
 		});
 
-		timeout(TIMEOUT, 
-			async { 
-				self.inner().write().await.join(req).await
-			}
-		).await??;
-		
+		let fut = async {
+			let mut client = self.inner().write().await;
+			client.join(req).await
+		};
+
+		timeout(TIMEOUT, fut)
+			.await
+			.map_err(|e| anyhow!("Join listing timeout: {e}"))?
+			.map_err(|e| anyhow!("Join listing error status: {e}"))?;
+
 		Ok(())
 	}
-
-	
 }
 
-type WebClient = PuncherServiceClient<tonic_web::GrpcWebClientService<hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, tonic_web::GrpcWebCall<tonic::body::Body>>>>;
 
-async fn create_threadsafe_client(
-	server_url: String,
-	port: u16,
-) -> Result<ThreadSafe<WebClient>> {
-	let url = format!("{server_url}:{port}");
-
-	let https = HttpsConnectorBuilder::new()
-		.with_native_roots()?
-		.https_or_http()
-		.enable_http1()
-		.build();
-
-	let client = hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(https);
-
-	let svc = tower::ServiceBuilder::new()
-		.layer(GrpcWebClientLayer::new())
-		.service(client);
-
-	let client: PuncherServiceClient<tonic_web::GrpcWebClientService<hyper_util::client::legacy::Client<HttpsConnector<HttpConnector>, tonic_web::GrpcWebCall<tonic::body::Body>>>>  = PuncherServiceClient::with_origin(svc, url.try_into()?);
-
-	Ok(Arc::new(RwLock::new(client)))
-}
-
-async fn create_session(
-	client: ThreadSafe<WebClient>, 
-	addr: SocketAddr,
-) -> Result<Uuid> {
-	let req = Request::new(CreateSessionRequest {
-		ip: addr.ip().to_string(),
-		port: addr.port().into(),
-	});
-	
-	let mut client = client.write().await;
-	let response = timeout(TIMEOUT,
-		client.create_session(req)
-	).await??;
-	
-	let id = response.into_inner().session_id;
-	Ok(Uuid::from_slice(&id[..16])?)
-}
-
-async fn start_session(
-	client: ThreadSafe<WebClient>, 
-	session_id: &Uuid,
-	addr: SocketAddr,
-	joined_dst: ThreadSafe<Vec<SocketAddr>>,
-) -> Result<Arc<StreamHandler>> {
-	let (status_tx, status_rx) = mpsc::channel(8);
-	let request = Request::new(ReceiverStream::new(status_rx));
-	
-	// initial ping with session_id must be send before
-	status_tx.send(ClientStatus { session_id: Some(session_id.as_bytes().to_vec()), status: None }).await?;
-
-	let response = {
-		let mut c = client.write().await;
-		timeout(TIMEOUT,
-			c.stream_session(request)
-		).await??
-	};
-
-	let stream_handler = StreamHandler::new(status_tx, addr, joined_dst);
-	tokio::spawn(stream_handler.clone().start(response.into_inner()));
-
-	Ok(stream_handler)
-}
-
-pub async fn punch_nat(target_addr: SocketAddr, _: SocketAddr) -> Result<()> {
+pub async fn punch(addr: SocketAddr) -> Result<()> {
 	let socket = Arc::new(UdpSocket::bind("0.0.0.0:0".parse::<SocketAddr>().unwrap()).await?);
-	socket.connect(target_addr).await?;
+	socket.connect(addr).await?;
 
 	let packet = b"punch";
 	let mut recv = [0u8; 5];
@@ -210,8 +207,10 @@ pub async fn punch_nat(target_addr: SocketAddr, _: SocketAddr) -> Result<()> {
 			}
 		} => {},
 
-		res = timeout(TIMEOUT, socket.recv(&mut recv)) => {
-			res??;
+		result = timeout(TIMEOUT, socket.recv(&mut recv)) => {
+			result
+				.map_err(|e| anyhow!("Punch timeout: {e}"))?
+				.map_err(|e| anyhow!("Error receiving punch packets: {e}"))?;
 		},
 	};
 
